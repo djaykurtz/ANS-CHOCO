@@ -41,7 +41,43 @@ const movements = [
 
 const buttons = [...document.querySelectorAll("[data-step]")];
 const diagram = document.querySelector(".system-diagram");
+const diagramScroll = document.getElementById("diagram-scroll");
+const architecture = document.getElementById("diagram-frame");
+const zoomStatus = document.getElementById("zoom-status");
+const zoomOut = document.getElementById("zoom-out");
+const zoomIn = document.getElementById("zoom-in");
+const zoomReset = document.getElementById("zoom-reset");
+const fullscreen = document.getElementById("fullscreen");
+const zoomLevels = [1, 1.15, 1.3, 1.5, 1.75, 2];
+const nodes = [...diagram.querySelectorAll(".node")];
+const stageFocus = [nodes[0], nodes[0], nodes[8], nodes[2], nodes[9], nodes[10]];
 let current = 0;
+let zoomIndex = 0;
+
+function focusDiagram(animate = false) {
+  const node = stageFocus[current];
+  const box = node.getBBox();
+  const scale = diagram.getBoundingClientRect().width / diagram.viewBox.baseVal.width;
+  let left = current === 0 ? 0 : Math.max(0, (box.x + box.width / 2) * scale - diagramScroll.clientWidth / 2);
+  if (zoomIndex === 0 && [2, 4, 5].includes(current)) {
+    const controllerStart = nodes[3].getBBox().x * scale - 20;
+    left = Math.min(left, controllerStart);
+  }
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  diagramScroll.scrollTo({ left, behavior: animate && !reducedMotion ? "smooth" : "auto" });
+}
+
+function setZoom(index) {
+  zoomIndex = Math.max(0, Math.min(zoomLevels.length - 1, index));
+  diagram.style.setProperty("--diagram-zoom", zoomLevels[zoomIndex]);
+  zoomOut.disabled = zoomIndex === 0;
+  zoomIn.disabled = zoomIndex === zoomLevels.length - 1;
+  zoomReset.disabled = zoomIndex === 0;
+  zoomStatus.textContent = zoomIndex === 0
+    ? "Readable size / scroll to explore the full diagram."
+    : `${Math.round(zoomLevels[zoomIndex] * 100)}% of readable size / scroll to explore.`;
+  focusDiagram();
+}
 
 function selectMovement(index, focus = false) {
   current = (index + movements.length) % movements.length;
@@ -62,8 +98,34 @@ function selectMovement(index, focus = false) {
   document.getElementById("movement-title").textContent = movement.title;
   document.getElementById("movement-description").textContent = movement.description;
   document.getElementById("movement-boundary").textContent = movement.boundary;
+  focusDiagram(true);
 }
 
+buttons.forEach((button) => { button.disabled = false; });
+document.getElementById("previous").disabled = false;
+document.getElementById("next").disabled = false;
+zoomIn.disabled = false;
+zoomIn.addEventListener("click", () => setZoom(zoomIndex + 1));
+zoomOut.addEventListener("click", () => setZoom(zoomIndex - 1));
+zoomReset.addEventListener("click", () => setZoom(0));
+window.addEventListener("resize", () => focusDiagram());
+if (architecture.requestFullscreen) {
+  fullscreen.hidden = false;
+  fullscreen.addEventListener("click", async () => {
+    try {
+      if (document.fullscreenElement === architecture) await document.exitFullscreen();
+      else await architecture.requestFullscreen();
+    } catch (error) {
+      zoomStatus.textContent = "Full screen is unavailable. Use readable-size zoom, scrolling, or the text equivalent.";
+    }
+  });
+  document.addEventListener("fullscreenchange", () => {
+    const active = document.fullscreenElement === architecture;
+    fullscreen.textContent = active ? "Exit full screen" : "Full screen";
+    fullscreen.setAttribute("aria-pressed", String(active));
+    focusDiagram();
+  });
+}
 buttons.forEach((button) => button.addEventListener("click", () => selectMovement(Number(button.dataset.step))));
 document.getElementById("previous").addEventListener("click", () => selectMovement(current - 1));
 document.getElementById("next").addEventListener("click", () => selectMovement(current + 1));

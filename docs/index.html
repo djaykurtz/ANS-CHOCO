@@ -31,13 +31,45 @@
       </div>
     </section>
 
-    <section class="architecture" aria-labelledby="diagram-heading">
+    <section class="movements" aria-labelledby="movement-heading">
+      <div class="movement-header">
+        <h2 id="movement-heading">Follow the movement</h2>
+        <div class="navigation"><button id="previous" type="button" aria-label="Previous architecture movement" disabled>&larr;</button><button id="next" type="button" aria-label="Next architecture movement" disabled>&rarr;</button></div>
+      </div>
+      <div class="stepper" role="group" aria-label="Architecture movements: arrow keys, Home and End also navigate">
+        <button type="button" data-step="0" aria-current="step" disabled><span>00</span> Overview</button>
+        <button type="button" data-step="1" disabled><span>01</span> Review</button>
+        <button type="button" data-step="2" disabled><span>02</span> Build</button>
+        <button type="button" data-step="3" disabled><span>03</span> Scope</button>
+        <button type="button" data-step="4" disabled><span>04</span> Align</button>
+        <button type="button" data-step="5" disabled><span>05</span> Evidence</button>
+      </div>
+      <div class="movement-copy" aria-live="polite" aria-atomic="true">
+        <p class="eyebrow" id="movement-label">00 / Full system</p>
+        <h3 id="movement-title">Separate intent, execution, and evidence.</h3>
+        <p id="movement-description">The repository describes approved state. The controller assembles and runs roles. Windows helpers reconcile the actual host. Reports describe outcomes, not guarantees.</p>
+        <p class="caption" id="movement-boundary">Explore without connecting to a host. The published page is static and carries no vault, inventory exports, or real deployment reports.</p>
+      </div>
+      <noscript><p>The full-size, scrollable diagram and textual architecture are available without JavaScript. Movement highlighting and zoom buttons require JavaScript.</p></noscript>
+    </section>
+
+    <section class="architecture" id="diagram-frame" aria-labelledby="diagram-heading">
       <div class="section-heading">
         <h2 id="diagram-heading">The system, in one frame</h2>
         <span class="eyebrow">Current source paths / dashed cards below = proposed or incomplete</span>
       </div>
-      <p class="mobile-note">On small screens, scroll the diagram horizontally or use the textual architecture below.</p>
-      <div class="diagram-scroll" tabindex="0" role="region" aria-label="Scrollable architecture diagram">
+      <div class="diagram-toolbar">
+        <p id="diagram-help">The diagram stays at a readable size. Scroll sideways or choose a movement above to focus its part of the system.</p>
+        <div class="zoom-controls" role="group" aria-label="Diagram view controls">
+          <button id="zoom-out" type="button" aria-controls="diagram-scroll" disabled>Zoom out</button>
+          <button id="zoom-reset" type="button" aria-controls="diagram-scroll" disabled>Readable size</button>
+          <button id="zoom-in" type="button" aria-controls="diagram-scroll" disabled>Zoom in</button>
+          <button id="fullscreen" type="button" aria-controls="diagram-frame" aria-pressed="false" hidden>Full screen</button>
+          <a href="#text-model">Read text equivalent</a>
+        </div>
+        <p class="view-status" id="zoom-status" role="status">Readable size / scroll to explore the full diagram.</p>
+      </div>
+      <div class="diagram-scroll" id="diagram-scroll" tabindex="0" role="region" aria-label="Full-size architecture diagram; arrow keys scroll horizontally" aria-describedby="diagram-help">
         <svg class="system-diagram" viewBox="0 0 1440 620" role="img" aria-labelledby="svg-title svg-description">
           <title id="svg-title">ANS-CHOCO's current software-alignment architecture</title>
           <desc id="svg-description">A reviewed repository provides catalogs, playbooks, inventory and policy. A Linux controller loads local vault credentials, executes chocoBuild or chocoDeploy, and uses WinRM to reach authorized Windows hosts. Build helpers produce packages for configured sources. Windows PowerShell and Chocolatey reconcile installation state. JSON and HTML evidence return to controller-side fleet reporting. Build iteration reuses deployment logic. The textual architecture below explains each relationship and its implementation boundaries.</desc>
@@ -118,14 +150,14 @@
             <text x="650" y="293">5 modes / drift detection</text>
             <text x="650" y="318">Apps + runtime alignment</text>
             <text x="650" y="343">Removal / reboot policy</text>
-            <text class="node-foot" x="650" y="369">report in always; re-raise fatal</text>
+            <text class="node-foot" x="650" y="361"><tspan x="650">report in always; </tspan><tspan x="650" dy="21">re-raise fatal</tspan></text>
           </g>
           <g class="node private-boundary" data-steps="4">
             <rect x="390" y="438" width="218" height="132" rx="3"/>
             <text class="node-kicker" x="408" y="466">PRIVATE / NEVER PUBLISHED</text>
             <text class="node-title" x="408" y="493">Local vault/</text>
             <text x="408" y="520">vars_files + vault password</text>
-            <text class="node-foot" x="408" y="546">Key Vault retrieval is not integrated</text>
+            <text class="node-foot" x="408" y="543"><tspan x="408">Key Vault retrieval </tspan><tspan x="408" dy="21">is not integrated</tspan></text>
           </g>
           <g class="node" data-steps="5">
             <rect x="632" y="438" width="218" height="132" rx="3"/>
@@ -170,27 +202,12 @@
       </div>
     </section>
 
-    <section class="movements" aria-labelledby="movement-heading">
-      <div class="movement-header">
-        <h2 id="movement-heading">Follow the movement</h2>
-        <div class="navigation"><button id="previous" type="button" aria-label="Previous architecture movement">&larr;</button><button id="next" type="button" aria-label="Next architecture movement">&rarr;</button></div>
-      </div>
-      <div class="stepper" role="group" aria-label="Architecture movements: arrow keys, Home and End also navigate">
-        <button type="button" data-step="0" aria-current="step"><span>00</span> Overview</button>
-        <button type="button" data-step="1"><span>01</span> Review</button>
-        <button type="button" data-step="2"><span>02</span> Build</button>
-        <button type="button" data-step="3"><span>03</span> Scope</button>
-        <button type="button" data-step="4"><span>04</span> Align</button>
-        <button type="button" data-step="5"><span>05</span> Evidence</button>
-      </div>
-      <div class="movement-copy" aria-live="polite" aria-atomic="true">
-        <p class="eyebrow" id="movement-label">00 / Full system</p>
-        <h3 id="movement-title">Separate intent, execution, and evidence.</h3>
-        <p id="movement-description">The repository describes approved state. The controller assembles and runs roles. Windows helpers reconcile the actual host. Reports describe outcomes, not guarantees.</p>
-        <p class="caption" id="movement-boundary">Explore without connecting to a host. The published page is static and carries no vault, inventory exports, or real deployment reports.</p>
-      </div>
-      <noscript><p>The full diagram and textual architecture are available without JavaScript. Movement highlighting requires JavaScript.</p></noscript>
-    </section>
+    <div class="image-links" aria-label="Full-size architecture screenshots">
+      <span>Full-size reference images:</span>
+      <a href="assets/architecture-overview.png" target="_blank" rel="noopener">Overview / 1600 &times; 1100</a>
+      <a href="assets/architecture-alignment.png" target="_blank" rel="noopener">Alignment / 1600 &times; 1100</a>
+      <span>The live diagram and text above remain the readable source of meaning.</span>
+    </div>
 
     <section class="boundaries" aria-labelledby="boundary-heading">
       <h2 id="boundary-heading">Not every layer is finished</h2>
