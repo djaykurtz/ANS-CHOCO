@@ -1,0 +1,8 @@
+---
+# Example two-host lab inventory. Replace both names with authorized lab targets.
+all:
+  children:
+    basic_hosts:
+      hosts:
+        test-host-01.corp.example.com:
+        test-host-02.corp.example.com:

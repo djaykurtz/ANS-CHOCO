@@ -1,0 +1,16 @@
+galaxy_info:
+  role_name: sysPatch
+  author: choco-fleet
+  description: >
+    Maintenance-window automation for application servers. Runs the patch
+    sequence (Windows Update, Dell System Update, reboot) and then verifies
+    the host application stack: Windows services, scheduled tasks, HTTP
+    endpoints, and freshness of application log artifacts. Read-only by
+    default; every state change is explicitly opt-in.
+  license: internal
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Windows
+      versions:
+        - all
+dependencies: []

@@ -1,0 +1,36 @@
+---
+# nxlogConfig.yml - one-off post-install config drop for nxlog.
+# Not a generic "app + config" framework - hardcoded to nxlog only.
+# Deploys our nxlog.conf and restarts the service only when the deployed
+# content actually changes (idempotent, mirrors the rest of the role).
+
+- name: nxlogConfig | Check if nxlog is installed
+  ansible.windows.win_stat:
+    path: C:\Program Files\nxlog\nxlog.exe
+  register: nxlog_install_check
+
+- name: nxlogConfig | Deploy nxlog.conf
+  ansible.windows.win_copy:
+    src: nxlog.conf
+    dest: C:\Program Files\nxlog\conf\nxlog.conf
+  register: nxlog_conf_deploy
+  when: nxlog_install_check.stat.exists
+
+- name: nxlogConfig | Restart nxlog service after config change
+  ansible.windows.win_service:
+    name: nxlog
+    state: restarted
+  when:
+    - nxlog_install_check.stat.exists
+    - nxlog_conf_deploy.changed | default(false)
+
+# STUB: verification-of-working check, intentionally not implemented yet.
+# Once we know what "working" means for this fleet (service running,
+# config parses clean, log forwarding actually reaching the collector,
+# etc.), replace this with a real assertion and decide how a failure
+# should surface (advisory vs. report error vs. hard fail).
+- name: nxlogConfig | Verify nxlog service health (stub)
+  ansible.windows.win_service_info:
+    name: nxlog
+  register: nxlog_service_stub_check
+  when: nxlog_install_check.stat.exists

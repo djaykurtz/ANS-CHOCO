@@ -1,0 +1,71 @@
+---
+# rebootHost.yml
+# End-of-run reboot with Windows Application event log entry.
+# Controlled by choco_deploy_reboot: never | always | if_needed
+
+- name: rebootHost | Evaluate reboot decision
+  ansible.builtin.set_fact:
+    choco_deploy_reboot_execute: >-
+      {{
+        (choco_deploy_reboot | default('never') == 'always')
+        or (
+          (choco_deploy_reboot | default('never') == 'if_needed')
+          and (init_reboot_status.PendingReboot | default(false) | bool)
+        )
+      }}
+  changed_when: false
+
+- name: rebootHost | Write reboot event to Windows Application log
+  ansible.windows.win_shell: |
+    $reasons = @('{{ (init_reboot_status.Reasons | default([])) | join("', '") }}') | Where-Object { $_ -ne '' }
+    $reasonText = if ($reasons.Count -gt 0) { $reasons -join ', ' } else { 'no pending reboot indicators' }
+    $msg = @(
+      "chocoDeploy initiated a reboot on this host."
+      "Policy: {{ choco_deploy_reboot | default('never') }}"
+      "Deployment: {{ deployment }}"
+      "Pending reboot indicators: $reasonText"
+      "Timestamp (UTC): {{ choco_deploy_report_timestamp_utc | default('unknown') }}"
+    ) -join "`r`n"
+    if (-not [System.Diagnostics.EventLog]::SourceExists('chocoDeploy')) {
+      New-EventLog -LogName Application -Source 'chocoDeploy'
+    }
+    Write-EventLog -LogName Application -Source 'chocoDeploy' -EventId 1000 -EntryType Information -Message $msg
+  when: choco_deploy_reboot_execute | bool
+  changed_when: false
+  failed_when: false
+
+- name: rebootHost | Record reboot event in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': 'Reboot',
+            'software': 'system',
+            'previous_version': '',
+            'new_version': '',
+            'source': 'chocoDeploy',
+            'notes': 'Reboot initiated. Policy=' ~ (choco_deploy_reboot | default('never')) ~ '. Reasons=' ~ ((init_reboot_status.Reasons | default([])) | join(', ') if ((init_reboot_status.Reasons | default([])) | length > 0) else 'none')
+          }
+        ]
+      }}
+  when: choco_deploy_reboot_execute | bool
+  changed_when: false
+
+- name: rebootHost | Reboot host
+  ansible.windows.win_reboot:
+    reboot_timeout: "{{ choco_deploy_reboot_timeout | default(600) }}"
+    msg: "{{ choco_deploy_reboot_msg | default('chocoDeploy: Scheduled reboot after software alignment.') }}"
+    pre_reboot_delay: 5
+    post_reboot_delay: 0
+    test_command: whoami
+  when: choco_deploy_reboot_execute | bool
+
+- name: rebootHost | Skip reboot (policy={{ choco_deploy_reboot | default('never') }})
+  ansible.builtin.debug:
+    msg: >-
+      Reboot skipped. policy={{ choco_deploy_reboot | default('never') }};
+      pending_reboot={{ init_reboot_status.PendingReboot | default(false) }}
+    verbosity: 1
+  when: not (choco_deploy_reboot_execute | bool)
+  changed_when: false

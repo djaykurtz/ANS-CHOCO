@@ -1,0 +1,45 @@
+# ops/report.yml -- winUpdate
+#
+# Writes the per-run JSON on the target and a copy on the control node. Skipped
+# entirely when a calling role owns the report, so a maintenance window
+# produces one report rather than two.
+
+- name: report | Build the report payload
+  ansible.builtin.set_fact:
+    _wu_report:
+      report_time: "{{ _wu_run_ts }}"
+      system: "{{ inventory_hostname }}"
+      role: winUpdate
+      mode: "{{ update }}"
+      inventory_source: "{{ ansible_inventory_sources | default([]) | first | default('unknown') }}"
+      client_state: "{{ winupdate_state }}"
+      result: "{{ winupdate_result }}"
+      categories: "{{ _wu_categories }}"
+      reject_list: "{{ winupdate_reject_list }}"
+      accept_list: "{{ winupdate_accept_list }}"
+  changed_when: false
+
+- name: report | Write the per-run JSON on the target
+  ansible.windows.win_copy:
+    dest: "{{ _wu_remote_dir_fs }}/{{ _wu_run_ts }}_winUpdate.json"
+    content: "{{ _wu_report | to_json }}"
+
+- name: report | Ensure the control-node log directory exists
+  ansible.builtin.file:
+    path: "{{ winupdate_report_dir_local }}"
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+
+- name: report | Write the per-run JSON copy on the control node
+  ansible.builtin.copy:
+    dest: "{{ winupdate_report_dir_local }}/{{ _wu_run_ts }}_{{ inventory_hostname }}_winUpdate.json"
+    content: "{{ _wu_report | to_nice_json }}"
+    mode: '0644'
+  delegate_to: localhost
+
+- name: report | Show where the report landed
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}] report at
+      {{ winupdate_report_dir_local }}/{{ _wu_run_ts }}_{{ inventory_hostname }}_winUpdate.json

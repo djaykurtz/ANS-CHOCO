@@ -1,0 +1,122 @@
+# tasks/main.yml -- softwareUsage role
+#
+# Per-host flow:
+#   1. Compute resolved settings (lookback days, threshold, paths)
+#   2. Ensure remote log dir exists
+#   3. Upload gather_usage.ps1 (idempotent; only re-copies on change)
+#   4. Execute it with the tracked_apps catalog passed as JSON arg
+#   5. Save the JSON output on the target AND on the control node
+#   6. Render per-host HTML report on the target
+#
+# Per-play (once):
+#   7. Write the consolidated fleet JSON inventory file on the control node
+#      (a tiny manifest listing all host JSONs produced this run, which the
+#      fleet_summary.py script then reads).
+#
+# Operational rules (matches chocoDeploy):
+#   * No reboots, no software changes, read-only role.
+#   * Streams to terminal -- no inline pipes that swallow output.
+#   * Safe to ctrl-C: each step is idempotent.
+
+---
+
+- name: usage | Resolve runtime settings
+  ansible.builtin.set_fact:
+    _usage_days:        "{{ (usage_days | default(30)) | int }}"
+    _usage_min:         "{{ (usage_min_executions | default(2)) | int }}"
+    _usage_max_detail:  "{{ (usage_max_detail_rows_per_app | default(25)) | int }}"
+    _usage_remote_dir:  "{{ usage_report_dir_remote }}"
+    _usage_local_dir:   "{{ usage_report_dir_local }}"
+    _usage_run_ts:      "{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
+
+- name: usage | Build absolute control-node report dir
+  ansible.builtin.set_fact:
+    _usage_local_dir_abs: "{{ _usage_local_dir if (_usage_local_dir.startswith('/')) else (playbook_dir ~ '/' ~ _usage_local_dir) }}"
+
+- name: usage | Ensure remote log dir exists
+  ansible.windows.win_file:
+    path: "{{ _usage_remote_dir }}"
+    state: directory
+
+- name: usage | Upload gather_usage.ps1
+  ansible.windows.win_copy:
+    src: gather_usage.ps1
+    dest: "{{ _usage_remote_dir }}\\gather_usage.ps1"
+  changed_when: false
+
+- name: usage | Serialize tracked_apps catalog for the PowerShell script
+  ansible.builtin.set_fact:
+    _usage_catalog_json: "{{ tracked_apps | to_json }}"
+
+- name: usage | Run gather_usage.ps1 (reads Security 4688 events, returns JSON)
+  ansible.windows.win_shell: |
+    $catalog = @'
+    {{ _usage_catalog_json }}
+    '@
+    & '{{ _usage_remote_dir }}\gather_usage.ps1' `
+        -CatalogJson  $catalog `
+        -LookbackDays {{ _usage_days }} `
+        -MinExecutions {{ _usage_min }} `
+        -MaxDetailRows {{ _usage_max_detail }}
+  register: _usage_run
+  changed_when: false
+  # The Security log can be huge. Cap WinRM wall-clock at 8 minutes per host.
+  vars:
+    ansible_command_timeout: 480
+  timeout: 540
+
+- name: usage | Parse gather output
+  ansible.builtin.set_fact:
+    _usage_data: "{{ _usage_run.stdout | from_json }}"
+  failed_when: _usage_data is not mapping
+
+- name: usage | Per-host summary line (visible in terminal)
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}]
+      audit_on={{ _usage_data.audit_on }}
+      cmdline_capture={{ _usage_data.cmdline_capture }}
+      examined={{ _usage_data.events_examined }}
+      matched={{ _usage_data.events_matched }}
+      scan={{ _usage_data.scan_duration_sec }}s
+      verdicts:
+      used={{ _usage_data.apps.values() | selectattr('verdict','equalto','used_recently') | list | length }}
+      unused={{ _usage_data.apps.values() | selectattr('verdict','equalto','unused_in_window') | list | length }}
+      audit_off={{ _usage_data.apps.values() | selectattr('verdict','equalto','audit_off') | list | length }}
+
+- name: usage | Write per-run JSON on target host
+  ansible.windows.win_copy:
+    dest: "{{ _usage_remote_dir }}\\{{ _usage_run_ts }}_softwareUsage.json"
+    content: "{{ _usage_data | to_json }}"
+
+- name: usage | Render per-host HTML report on target host
+  ansible.windows.win_copy:
+    dest: "{{ _usage_remote_dir }}\\{{ _usage_run_ts }}_softwareUsage.html"
+    content: "{{ lookup('template', 'host_report.html.j2') }}"
+
+- name: usage | Ensure control-node log dir exists
+  ansible.builtin.file:
+    path: "{{ _usage_local_dir_abs }}"
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+
+- name: usage | Write per-run JSON copy on control node
+  ansible.builtin.copy:
+    dest: "{{ _usage_local_dir_abs }}/{{ _usage_run_ts }}_{{ inventory_hostname }}_softwareUsage.json"
+    content: "{{ _usage_data | to_nice_json }}"
+    mode: '0644'
+  delegate_to: localhost
+
+- name: usage | Write per-run HTML copy on control node
+  ansible.builtin.copy:
+    dest: "{{ _usage_local_dir_abs }}/{{ _usage_run_ts }}_{{ inventory_hostname }}_softwareUsage.html"
+    content: "{{ lookup('template', 'host_report.html.j2') }}"
+    mode: '0644'
+  delegate_to: localhost
+
+- name: usage | Final per-host hint (where to find reports)
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}] report at
+      {{ _usage_local_dir_abs }}/{{ _usage_run_ts }}_{{ inventory_hostname }}_softwareUsage.html

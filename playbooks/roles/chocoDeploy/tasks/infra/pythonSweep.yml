@@ -1,0 +1,356 @@
+---
+# infra/pythonSweep.yml
+# Out-of-policy Python cleanup. Runs once after all per-track aligners.
+#
+# A choco or vendor Python install is considered out of policy when EITHER:
+#   - choco_python_min_supported_track is set AND the track is strictly less
+#     than that floor (e.g. min_supported_track=3.12 catches 3.9, 3.10, 3.11)
+#   - choco_python_exclusive is true AND the track is not in
+#     choco_python_managed_tracks (the declared channels)
+#
+# Gating:
+#   - Sweep runs when EITHER predicate is active.
+#   - Skipped in choco_update mode UNLESS choco_python_floor_required is
+#     true (mixed-fleet onboarding scenario - update is normally narrow).
+#   - python_audit_only honored: discovery only, no removals.
+#
+# Alias packages (python, python3) are handled separately via
+# python_cleanup_aliases.
+
+- name: pythonSweep | Compute active sweep predicates
+  ansible.builtin.set_fact:
+    python_sweep_active: >-
+      {{
+        (
+          (choco_python_exclusive | default(false) | bool)
+          or ((choco_python_min_supported_track | default('') | length) > 0)
+        )
+        and (
+          deployment != 'choco_update'
+          or (choco_python_floor_required | default(false) | bool)
+        )
+      }}
+  changed_when: false
+
+- name: pythonSweep | Skip when no sweep predicate is active
+  ansible.builtin.debug:
+    msg: "pythonSweep: SKIP - no sweep predicate active (exclusive=false, no min_supported_track)"
+  when:
+    - not python_sweep_active
+    - choco_deploy_console_verbose | default(false) | bool
+  changed_when: false
+
+- name: pythonSweep | Compute out-of-policy choco python packages
+  ansible.builtin.set_fact:
+    python_sweep_choco_pkgs: >-
+      {%- set managed = choco_python_managed_tracks | default([]) -%}
+      {%- set floor = choco_python_min_supported_track | default('') -%}
+      {%- set exclusive = (choco_python_exclusive | default(false)) | bool -%}
+      {%- set result = [] -%}
+      {%- for key in choco_installed_map.keys() -%}
+        {%- if key is match('^python[0-9][0-9]+$') -%}
+          {%- set major = key | regex_replace('^python([0-9])([0-9]+)$', '\\1') -%}
+          {%- set minor = key | regex_replace('^python([0-9])([0-9]+)$', '\\2') -%}
+          {%- set track = major ~ '.' ~ minor -%}
+          {%- set below_floor = (floor | length > 0) and (track is version(floor, '<')) -%}
+          {%- set not_managed = exclusive and (track not in managed) -%}
+          {%- if below_floor or not_managed -%}
+            {%- set reason = 'below_floor' if below_floor else 'exclusive' -%}
+            {%- set _ = result.append({
+              'pkg': key, 'track': track,
+              'version': choco_installed_map[key],
+              'reason': reason
+            }) -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ result }}
+  when: python_sweep_active
+  changed_when: false
+
+- name: pythonSweep | Discover out-of-policy vendor Python installs
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $managedJson = @'
+    {{ choco_python_managed_tracks | default([]) | to_json }}
+    '@
+    $managed   = @(($managedJson.Trim()) | ConvertFrom-Json)
+    $floor     = '{{ choco_python_min_supported_track | default('') }}'
+    $exclusive = [bool]::Parse('{{ (choco_python_exclusive | default(false)) | bool | string | lower }}')
+
+    function Compare-Track {
+      param([string]$a, [string]$b)
+      $av = $a.Split('.'); $bv = $b.Split('.')
+      $av0 = [int]$av[0]; $av1 = [int]$av[1]
+      $bv0 = [int]$bv[0]; $bv1 = [int]$bv[1]
+      if ($av0 -lt $bv0) { return -1 }
+      if ($av0 -gt $bv0) { return 1 }
+      if ($av1 -lt $bv1) { return -1 }
+      if ($av1 -gt $bv1) { return 1 }
+      return 0
+    }
+
+    $hits = @()
+    $paths = @(
+      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    foreach ($p in $paths) {
+      Get-ItemProperty $p |
+        Where-Object {
+          $_.DisplayName -match '^Python\s+(\d+)\.(\d+)' -and
+          $_.Publisher -notmatch 'Chocolatey'
+        } |
+        ForEach-Object {
+          if ($_.DisplayName -match '^Python\s+(\d+)\.(\d+)') {
+            $track = "$($Matches[1]).$($Matches[2])"
+            $belowFloor = ($floor.Length -gt 0) -and ((Compare-Track $track $floor) -lt 0)
+            $notManaged = $exclusive -and ($managed -notcontains $track)
+            if ($belowFloor -or $notManaged) {
+              $reason = if ($belowFloor) { 'below_floor' } else { 'exclusive' }
+              $hits += [pscustomobject]@{
+                DisplayName          = $_.DisplayName
+                DisplayVersion       = $_.DisplayVersion
+                Track                = $track
+                Reason               = $reason
+                UninstallString      = $_.UninstallString
+                QuietUninstallString = $_.QuietUninstallString
+                ProductCode          = $_.PSChildName
+              }
+            }
+          }
+        }
+    }
+    $hits | ConvertTo-Json -Compress
+  register: python_sweep_vendor_raw
+  changed_when: false
+  failed_when: false
+  when:
+    - python_sweep_active
+
+- name: pythonSweep | Parse out-of-policy vendor results
+  ansible.builtin.set_fact:
+    python_sweep_vendor_list: >-
+      {%- set raw = python_sweep_vendor_raw.stdout | default('') | trim -%}
+      {%- if raw | length == 0 -%}
+        []
+      {%- else -%}
+        {%- set parsed = raw | from_json -%}
+        {%- if parsed is mapping -%}
+          {{ [parsed] }}
+        {%- else -%}
+          {{ parsed }}
+        {%- endif -%}
+      {%- endif -%}
+  when:
+    - python_sweep_active
+  changed_when: false
+
+- name: pythonSweep | Summary of out-of-policy Python installs
+  ansible.builtin.debug:
+    msg: >-
+      pythonSweep: managed={{ choco_python_managed_tracks | default([]) }},
+      floor={{ choco_python_min_supported_track | default('(none)') }},
+      exclusive={{ choco_python_exclusive | default(false) }},
+      choco_to_remove={{ (python_sweep_choco_pkgs | default([])) | map(attribute='pkg') | list }},
+      vendor_to_remove={{ (python_sweep_vendor_list | default([])) | map(attribute='DisplayName') | list }}
+  when:
+    - python_sweep_active
+    - choco_deploy_console_verbose | default(false) | bool
+  changed_when: false
+
+- name: pythonSweep | Remove out-of-policy choco python packages
+  chocolatey.chocolatey.win_chocolatey:
+    name: "{{ item.pkg }}"
+    state: absent
+  loop: "{{ python_sweep_choco_pkgs | default([]) }}"
+  loop_control:
+    label: "{{ item.pkg }} ({{ item.track }}, {{ item.reason }})"
+  failed_when: false
+  when:
+    - python_sweep_active
+    - not (python_audit_only | default(false) | bool)
+    - (python_sweep_choco_pkgs | default([]) | length) > 0
+
+- name: pythonSweep | Record removed choco python packages in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': 'Removed',
+            'software': item.pkg,
+            'previous_version': item.version,
+            'new_version': '',
+            'source': 'chocolatey',
+            'notes': (
+              'Removed Python track ' ~ item.track ~ ' (below min supported track ' ~ choco_python_min_supported_track ~ ')'
+              if item.reason == 'below_floor'
+              else 'Removed out-of-policy Python track ' ~ item.track ~ ' (exclusive mode)'
+            )
+          }
+        ]
+      }}
+  loop: "{{ python_sweep_choco_pkgs | default([]) }}"
+  loop_control:
+    label: "{{ item.pkg }}"
+  when:
+    - python_sweep_active
+    - not (python_audit_only | default(false) | bool)
+    - (python_sweep_choco_pkgs | default([]) | length) > 0
+  changed_when: false
+
+- name: pythonSweep | Compute distinct below-floor / out-of-policy vendor tracks
+  ansible.builtin.set_fact:
+    python_sweep_vendor_tracks_to_remove: >-
+      {{
+        (python_sweep_vendor_list | default([]))
+        | map(attribute='Track')
+        | reject('equalto', '')
+        | reject('equalto', None)
+        | unique
+        | sort
+      }}
+  when:
+    - python_sweep_active
+  changed_when: false
+
+- name: pythonSweep | Upload per-track vendor removal helper
+  ansible.windows.win_copy:
+    src: remove_vendor_python_track.ps1
+    dest: 'C:/Windows/Temp/remove_vendor_python_track.ps1'
+  when:
+    - python_sweep_active
+    - not (python_audit_only | default(false) | bool)
+    - (python_sweep_vendor_tracks_to_remove | default([]) | length) > 0
+  changed_when: false
+
+- name: pythonSweep | Remove out-of-policy vendor Python (per track)
+  # Iterates msiexec /x on each component for the track, falls back to
+  # direct registry-key removal when a component returns 1603 (typically
+  # pip Bootstrap and Tcl/Tk Support after Core is gone). Verified on
+  # test-host-01 and fleet-host-11 against 3.9, 3.10, 3.11 installs (June 4 2026).
+  ansible.windows.win_shell: >-
+    & 'C:/Windows/Temp/remove_vendor_python_track.ps1'
+    -Track '{{ item }}'
+  loop: "{{ python_sweep_vendor_tracks_to_remove | default([]) }}"
+  loop_control:
+    label: "vendor track {{ item }}"
+  register: python_sweep_vendor_remove
+  changed_when: true
+  failed_when: false
+  when:
+    - python_sweep_active
+    - not (python_audit_only | default(false) | bool)
+    - (python_sweep_vendor_tracks_to_remove | default([]) | length) > 0
+
+- name: pythonSweep | Parse per-track vendor removal results
+  ansible.builtin.set_fact:
+    python_sweep_vendor_remove_parsed: >-
+      {{
+        (python_sweep_vendor_remove.results | default([]))
+        | map(attribute='stdout')
+        | map('trim')
+        | reject('equalto', '')
+        | map('from_json')
+        | list
+      }}
+  when:
+    - python_sweep_active
+    - not (python_audit_only | default(false) | bool)
+    - (python_sweep_vendor_tracks_to_remove | default([]) | length) > 0
+  changed_when: false
+
+- name: pythonSweep | Record vendor Python removal events in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action':            'Removed',
+            'software':          item.1.component,
+            'previous_version':  item.1.product_code,
+            'new_version':       '',
+            'source':            'vendor',
+            'notes': (
+              'Removed Python track ' ~ item.0.track
+                ~ ' (below min supported track ' ~ choco_python_min_supported_track ~ ')'
+                ~ ' via ' ~ item.1.action
+            )
+          }
+        ]
+      }}
+  loop: >-
+    {{
+      python_sweep_vendor_remove_parsed | default([])
+      | subelements('details', skip_missing=True)
+    }}
+  loop_control:
+    label: "{{ item.1.component | default('?') }} ({{ item.1.action | default('?') }})"
+  when:
+    - python_sweep_active
+    - not (python_audit_only | default(false) | bool)
+    - (python_sweep_vendor_remove_parsed | default([]) | length) > 0
+  changed_when: false
+
+- name: pythonSweep | Surface stuck vendor python entries as errors
+  ansible.builtin.set_fact:
+    choco_deploy_report_errors: >-
+      {{
+        (choco_deploy_report_errors | default([])) + [{
+          'software':  'python-track-' ~ item.track,
+          'operation': 'python-vendor-sweep-incomplete',
+          'message':   (
+            'Vendor Python track ' ~ item.track ~ ' sweep incomplete: '
+            ~ item.entries_after ~ ' component(s) remain after '
+            ~ item.msiexec_succeeded ~ ' msiexec_ok + '
+            ~ item.msiexec_failed_then_reg_deleted ~ ' reg-fallback'
+          )
+        }]
+      }}
+  loop: "{{ python_sweep_vendor_remove_parsed | default([]) }}"
+  loop_control:
+    label: "{{ item.track | default('?') }} (entries_after={{ item.entries_after | default(0) }})"
+  when:
+    - python_sweep_active
+    - not (python_audit_only | default(false) | bool)
+    - (item.entries_after | default(0) | int) > 0
+  changed_when: false
+
+- name: pythonSweep | Query alias packages
+  ansible.windows.win_command: >
+    choco list --local-only --limit-output python python3
+  register: python_alias_query
+  changed_when: false
+  failed_when: false
+  when:
+    - python_cleanup_aliases | default(false) | bool
+
+- name: pythonSweep | Compute alias packages to remove
+  ansible.builtin.set_fact:
+    python_alias_to_remove: >-
+      {{
+        (python_alias_query.stdout_lines | default([]))
+        | map('trim')
+        | select('ne', '')
+        | map('regex_replace', '\|.*$', '')
+        | select('match', '^(python|python3)$')
+        | unique
+        | list
+      }}
+  when:
+    - python_cleanup_aliases | default(false) | bool
+  changed_when: false
+
+- name: pythonSweep | Remove Python alias packages
+  chocolatey.chocolatey.win_chocolatey:
+    name: "{{ item }}"
+    state: absent
+  loop: "{{ python_alias_to_remove | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  failed_when: false
+  when:
+    - python_cleanup_aliases | default(false) | bool
+    - not (python_audit_only | default(false) | bool)
+    - (python_alias_to_remove | default([]) | length) > 0

@@ -1,0 +1,18 @@
+---
+# Choco update mode:
+# Fast alignment pass that only considers packages visible through Chocolatey.
+
+- name: Choco Update | Debug target list
+  ansible.builtin.debug:
+    msg: >-
+      Choco update mode targeting these apps:
+      {{ detected_managed_apps | map(attribute='key') | list }}
+  when: choco_deploy_console_verbose | default(false) | bool
+
+- name: Choco Update | Run app-specific alignment for Chocolatey-managed apps
+  ansible.builtin.include_tasks: "{{ item.task_file }}"
+  loop: "{{ detected_managed_apps }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    app_catalog_item: "{{ item }}"

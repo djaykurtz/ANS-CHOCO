@@ -1,0 +1,27 @@
+# playbooks/rebootHost.yml
+---
+- name: Reboot Windows host(s)
+  hosts: basic_hosts
+  gather_facts: false
+  collections:
+    - ansible.windows
+
+  vars_files:
+    - "{{ playbook_dir }}/../vault/corp-ans-secret.yml"
+
+  vars:
+    reboot_reason: "Operator-requested reboot via rebootHost.yml"
+    reboot_pre_delay: 0
+    reboot_post_delay: 30
+    reboot_timeout: 1800
+
+  tasks:
+    - name: rebootHost | Reboot target
+      ansible.windows.win_reboot:
+        msg: "{{ reboot_reason }}"
+        pre_reboot_delay: "{{ reboot_pre_delay }}"
+        post_reboot_delay: "{{ reboot_post_delay }}"
+        reboot_timeout: "{{ reboot_timeout }}"
+
+    - name: rebootHost | Confirm host is responsive
+      ansible.windows.win_ping:

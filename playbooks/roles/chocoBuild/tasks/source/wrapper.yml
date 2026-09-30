@@ -1,0 +1,88 @@
+---
+# playbooks/roles/chocoBuild/tasks/source/wrapper.yml
+#
+# Synthesize wrapper .nupkgs on the mirror by iterating over the
+# entries in chocoBuild_wrapper_packages (loaded from
+# files/wrapper-spec.yml).
+#
+# A "wrapper" reuses the trusted chocolatey install SCRIPT that came
+# from a previously-internalized BASE version of a package, but swaps
+# in a different vendor INSTALLER BINARY. The new binary must be
+# verifiable against an OFFICIAL vendor-published hash. The result is
+# a fully self-contained .nupkg whose entire trust chain (script +
+# binary) is verifiable without round-tripping to the community feed
+# at install time.
+#
+# Inputs (set by the caller):
+#   chocoBuild_wrapper_packages  - list of wrapper entries (see wrapper-spec.yml for schema)
+#   choco_internalize_dir        - mirror root, default 'C:\tools\chocoRepo'
+#   wrapper_force                - rebuild even if sentinel exists (default false)
+#   wrapper_only                 - if set, only build this PackageId from the spec
+
+- name: chocoBuild wrapper | Validate spec is loaded
+  ansible.builtin.assert:
+    that:
+      - chocoBuild_wrapper_packages is defined
+      - chocoBuild_wrapper_packages | length > 0
+    fail_msg: >-
+      chocoBuild_wrapper_packages is empty or undefined. Make sure
+      wrapper-spec.yml is loaded by the caller via vars_files or
+      include_vars.
+
+- name: chocoBuild wrapper | Determine effective spec subset
+  ansible.builtin.set_fact:
+    _chocoBuild_wrapper_selected: >-
+      {{
+        chocoBuild_wrapper_packages
+        if (wrapper_only | default('') | length == 0)
+        else (chocoBuild_wrapper_packages | selectattr('id', 'equalto', wrapper_only) | list)
+      }}
+
+- name: chocoBuild wrapper | Show selected entries
+  ansible.builtin.debug:
+    msg: >-
+      Will attempt to build {{ _chocoBuild_wrapper_selected | length }}
+      wrapper(s): {{ _chocoBuild_wrapper_selected | map(attribute='id') | list }}
+      (force={{ wrapper_force | default(false) }})
+
+- name: chocoBuild wrapper | Bail if wrapper_only matched nothing
+  ansible.builtin.fail:
+    msg: "wrapper_only={{ wrapper_only }} did not match any entry in wrapper-spec.yml"
+  when:
+    - wrapper_only | default('') | length > 0
+    - _chocoBuild_wrapper_selected | length == 0
+
+- name: chocoBuild wrapper | Upload helper script
+  ansible.windows.win_copy:
+    src: "{{ role_path }}/files/build_wrapper_nupkg.ps1"
+    dest: "C:/Windows/Temp/build_wrapper_nupkg.ps1"
+  when: _chocoBuild_wrapper_selected | length > 0
+
+- name: chocoBuild wrapper | Build each wrapper from spec
+  ansible.windows.win_shell: >-
+    & 'C:/Windows/Temp/build_wrapper_nupkg.ps1'
+    -RepoRoot       '{{ choco_internalize_dir }}'
+    -PackageId      '{{ item.id }}'
+    -BaseVersion    '{{ item.base_version }}'
+    -NewVersion     '{{ item.new_version }}'
+    -InstallerUrl   '{{ item.installer_url }}'
+    -InstallerGlob  '{{ item.installer_glob }}'
+    {% if item.checksums_url is defined %}-ChecksumsUrl   '{{ item.checksums_url }}'{% endif %}
+    {% if item.checksums_match is defined %}-ChecksumsMatch '{{ item.checksums_match }}'{% endif %}
+    {% if item.expected_sha256 is defined %}-ExpectedSha256 '{{ item.expected_sha256 }}'{% endif %}
+    {% if item.base_nupkg_sha256 is defined %}-BaseNupkgSha256 '{{ item.base_nupkg_sha256 }}'{% endif %}
+    {{ '-Force' if wrapper_force | default(false) | bool else '' }}
+  loop: "{{ _chocoBuild_wrapper_selected }}"
+  loop_control:
+    label: "{{ item.id }} {{ item.base_version }} -> {{ item.new_version }}"
+  register: chocoBuild_wrapper_results
+  changed_when: chocoBuild_wrapper_results.stdout is search('"Status":"Built"')
+  failed_when: chocoBuild_wrapper_results.rc != 0 or chocoBuild_wrapper_results.stdout is search('"Status":"Failed"')
+
+- name: chocoBuild wrapper | Show per-entry result
+  ansible.builtin.debug:
+    msg: "{{ item.stdout | trim | from_json }}"
+  loop: "{{ chocoBuild_wrapper_results.results }}"
+  loop_control:
+    label: "{{ item.item.id }} {{ item.item.new_version }}"
+  when: item.stdout is defined and (item.stdout | trim | length) > 0

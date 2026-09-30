@@ -1,0 +1,286 @@
+---
+# infra/dotnetSweep.yml
+# Out-of-policy .NET cleanup. Runs once after all per-track aligners.
+#
+# A choco or vendor .NET install is considered out of policy when EITHER:
+#   - choco_dotnet_min_supported_track is set AND the track is strictly less
+#     than that floor (e.g. min_supported_track=8.0 catches .NET 6 and 7)
+#   - choco_dotnet_exclusive is true AND the track is not in
+#     choco_dotnet_managed_tracks (the declared channels)
+#
+# Gating:
+#   - Sweep runs when EITHER predicate is active.
+#   - Skipped in choco_update mode UNLESS choco_dotnet_floor_required is
+#     true (mixed-fleet onboarding scenario - update is normally narrow).
+#   - dotnet_audit_only honored: discovery only, no removals.
+#
+# Scope of vendor removal mirrors dotnetAlign: Runtime / ASP.NET Core /
+# Windows Desktop Runtime entries only. SDKs, Targeting Packs, Host
+# components, and IIS Hosting Bundles are NEVER touched here.
+
+- name: dotnetSweep | Compute active sweep predicates
+  ansible.builtin.set_fact:
+    dotnet_sweep_active: >-
+      {{
+        (
+          (choco_dotnet_exclusive | default(false) | bool)
+          or ((choco_dotnet_min_supported_track | default('') | length) > 0)
+        )
+        and (
+          deployment != 'choco_update'
+          or (choco_dotnet_floor_required | default(false) | bool)
+        )
+      }}
+  changed_when: false
+
+- name: dotnetSweep | Skip when no sweep predicate is active
+  ansible.builtin.debug:
+    msg: "dotnetSweep: SKIP - no sweep predicate active (exclusive=false, no min_supported_track)"
+  when:
+    - not dotnet_sweep_active
+    - choco_deploy_console_verbose | default(false) | bool
+  changed_when: false
+
+- name: dotnetSweep | Compute out-of-policy choco .NET packages
+  ansible.builtin.set_fact:
+    dotnet_sweep_choco_pkgs: >-
+      {%- set managed = choco_dotnet_managed_tracks | default([]) -%}
+      {%- set floor = choco_dotnet_min_supported_track | default('') -%}
+      {%- set exclusive = (choco_dotnet_exclusive | default(false)) | bool -%}
+      {%- set result = [] -%}
+      {%- set fams = ['aspnetruntime', 'runtime', 'windowsdesktop-runtime'] -%}
+      {%- for key in choco_installed_map.keys() -%}
+        {%- if key.startswith('dotnet-') -%}
+          {%- for fam in fams -%}
+            {%- set suffix = '-' ~ fam -%}
+            {%- if key.endswith(suffix) -%}
+              {%- set track = key[7:][:-(suffix | length)] -%}
+              {%- if track is match('^[0-9]+\.[0-9]+$') -%}
+                {%- set below_floor = (floor | length > 0) and (track is version(floor, '<')) -%}
+                {%- set not_managed = exclusive and (track not in managed) -%}
+                {%- if below_floor or not_managed -%}
+                  {%- set reason = 'below_floor' if below_floor else 'exclusive' -%}
+                  {%- set _ = result.append({
+                    'pkg': key, 'track': track,
+                    'version': choco_installed_map[key],
+                    'reason': reason
+                  }) -%}
+                {%- endif -%}
+              {%- endif -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ result }}
+  when: dotnet_sweep_active
+  changed_when: false
+
+- name: dotnetSweep | Discover out-of-policy vendor .NET installs
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $managedJson = @'
+    {{ choco_dotnet_managed_tracks | default([]) | to_json }}
+    '@
+    # YAML pipe-block indent leaves leading whitespace on each line; PowerShell
+    # ConvertFrom-Json wraps such content in an extra array layer, breaking
+    # -contains lookups. Trim first so we get a flat array of track strings.
+    $managed   = @(($managedJson.Trim()) | ConvertFrom-Json)
+    $floor     = '{{ choco_dotnet_min_supported_track | default('') }}'
+    $exclusive = [bool]::Parse('{{ (choco_dotnet_exclusive | default(false)) | bool | string | lower }}')
+
+    function Compare-Track {
+      param([string]$a, [string]$b)
+      $av = $a.Split('.'); $bv = $b.Split('.')
+      $av0 = [int]$av[0]; $av1 = [int]$av[1]
+      $bv0 = [int]$bv[0]; $bv1 = [int]$bv[1]
+      if ($av0 -lt $bv0) { return -1 }
+      if ($av0 -gt $bv0) { return 1 }
+      if ($av1 -lt $bv1) { return -1 }
+      if ($av1 -gt $bv1) { return 1 }
+      return 0
+    }
+
+    $hits = @()
+    $paths = @(
+      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    # Same scope as dotnetAlign: Runtime / ASP.NET Core / Windows Desktop
+    # Runtime only. Skip SDKs, Targeting Packs, Host components, and IIS
+    # Hosting Bundles - removing any of those can break unrelated workloads.
+    $accept = '^Microsoft\s+(\.NET(\s+Core)?(\s+Runtime)?|ASP\.NET\s+Core|Windows\s+Desktop\s+Runtime)\b'
+    $reject = '(SDK|Targeting Pack|Host\b|Host FX Resolver|Hosting Bundle)'
+    # Track is parsed from DisplayName. DisplayVersion is NOT reliable because
+    # Microsoft creates two registry entries per runtime: one with the
+    # semantic version, one with the MSI build version like 64.0.4211. Parsing
+    # track from DisplayVersion mis-identifies the MSI-build entry as a bogus
+    # track and could lead to deletions of in-channel tracks.
+    $nameTrackRegex = '(?:^|\s|-\s)(\d+)\.(\d+)(?:\.\d+)?\s*(?:\(|$)'
+    foreach ($p in $paths) {
+      Get-ItemProperty $p |
+        Where-Object {
+          $_.DisplayName -and
+          ($_.DisplayName -match $accept) -and
+          ($_.DisplayName -notmatch $reject) -and
+          ($_.Publisher -notmatch 'Chocolatey')
+        } |
+        ForEach-Object {
+          if ($_.DisplayName -match $nameTrackRegex) {
+            $track = "$($Matches[1]).$($Matches[2])"
+            $belowFloor = ($floor.Length -gt 0) -and ((Compare-Track $track $floor) -lt 0)
+            $notManaged = $exclusive -and ($managed -notcontains $track)
+            if ($belowFloor -or $notManaged) {
+              $reason = if ($belowFloor) { 'below_floor' } else { 'exclusive' }
+              $hits += [pscustomobject]@{
+                DisplayName          = $_.DisplayName
+                DisplayVersion       = $_.DisplayVersion
+                Track                = $track
+                Reason               = $reason
+                UninstallString      = $_.UninstallString
+                QuietUninstallString = $_.QuietUninstallString
+                ProductCode          = $_.PSChildName
+              }
+            }
+          }
+        }
+    }
+    $hits | ConvertTo-Json -Compress
+  register: dotnet_sweep_vendor_raw
+  changed_when: false
+  failed_when: false
+  when:
+    - dotnet_sweep_active
+
+- name: dotnetSweep | Parse out-of-policy vendor results
+  ansible.builtin.set_fact:
+    dotnet_sweep_vendor_list: >-
+      {%- set raw = dotnet_sweep_vendor_raw.stdout | default('') | trim -%}
+      {%- if raw | length == 0 -%}
+        []
+      {%- else -%}
+        {%- set parsed = raw | from_json -%}
+        {%- if parsed is mapping -%}
+          {{ [parsed] }}
+        {%- else -%}
+          {{ parsed }}
+        {%- endif -%}
+      {%- endif -%}
+  when:
+    - dotnet_sweep_active
+  changed_when: false
+
+- name: dotnetSweep | Summary of out-of-policy .NET installs
+  ansible.builtin.debug:
+    msg: >-
+      dotnetSweep: managed={{ choco_dotnet_managed_tracks | default([]) }},
+      floor={{ choco_dotnet_min_supported_track | default('(none)') }},
+      exclusive={{ choco_dotnet_exclusive | default(false) }},
+      choco_to_remove={{ (dotnet_sweep_choco_pkgs | default([])) | map(attribute='pkg') | list }},
+      vendor_to_remove={{ (dotnet_sweep_vendor_list | default([])) | map(attribute='DisplayName') | list }}
+  when:
+    - dotnet_sweep_active
+    - choco_deploy_console_verbose | default(false) | bool
+  changed_when: false
+
+- name: dotnetSweep | Remove out-of-policy choco .NET packages
+  chocolatey.chocolatey.win_chocolatey:
+    name: "{{ item.pkg }}"
+    state: absent
+  loop: "{{ dotnet_sweep_choco_pkgs | default([]) }}"
+  loop_control:
+    label: "{{ item.pkg }} ({{ item.track }}, {{ item.reason }})"
+  failed_when: false
+  when:
+    - dotnet_sweep_active
+    - not (dotnet_audit_only | default(false) | bool)
+    - (dotnet_sweep_choco_pkgs | default([]) | length) > 0
+
+- name: dotnetSweep | Record removed choco .NET packages in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': 'Removed',
+            'software': item.pkg,
+            'previous_version': item.version,
+            'new_version': '',
+            'source': 'chocolatey',
+            'notes': (
+              'Removed .NET track ' ~ item.track ~ ' (below min supported track ' ~ choco_dotnet_min_supported_track ~ ')'
+              if item.reason == 'below_floor'
+              else 'Removed out-of-policy .NET track ' ~ item.track ~ ' (exclusive mode)'
+            )
+          }
+        ]
+      }}
+  loop: "{{ dotnet_sweep_choco_pkgs | default([]) }}"
+  loop_control:
+    label: "{{ item.pkg }}"
+  when:
+    - dotnet_sweep_active
+    - not (dotnet_audit_only | default(false) | bool)
+    - (dotnet_sweep_choco_pkgs | default([]) | length) > 0
+  changed_when: false
+
+- name: dotnetSweep | Remove out-of-policy vendor .NET installs
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $itemsJson = @'
+    {{ dotnet_sweep_vendor_list | to_json }}
+    '@
+    $items = @()
+    if ($itemsJson.Trim()) {
+      $parsed = $itemsJson | ConvertFrom-Json
+      if ($parsed -is [System.Array]) {
+        $items = $parsed
+      } elseif ($null -ne $parsed) {
+        $items = @($parsed)
+      }
+    }
+
+    foreach ($i in $items) {
+      if ($i.ProductCode -match '^\{?[0-9A-Fa-f\-]{36}\}?$') {
+        $code = $i.ProductCode
+        if ($code -notmatch '^\{') { $code = '{' + $code + '}' }
+        Start-Process -FilePath msiexec.exe -ArgumentList @('/x', $code, '/qn', '/norestart') -Wait | Out-Null
+        continue
+      }
+      if ($i.QuietUninstallString) { cmd.exe /c $i.QuietUninstallString | Out-Null; continue }
+      if ($i.UninstallString)      { cmd.exe /c $i.UninstallString      | Out-Null; continue }
+    }
+
+    "RemovedCandidates=$($items.Count)"
+  register: dotnet_sweep_vendor_remove
+  changed_when: true
+  failed_when: false
+  when:
+    - dotnet_sweep_active
+    - not (dotnet_audit_only | default(false) | bool)
+    - (dotnet_sweep_vendor_list | default([]) | length) > 0
+
+- name: dotnetSweep | Record removed vendor .NET installs in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': 'Removed',
+            'software': (item.DisplayName | default('.NET vendor install')),
+            'previous_version': (item.DisplayVersion | default('')),
+            'new_version': '',
+            'source': 'vendor',
+            'notes': (
+              'Removed .NET track ' ~ (item.Track | default('?')) ~ ' (below min supported track ' ~ choco_dotnet_min_supported_track ~ ')'
+              if (item.Reason | default('')) == 'below_floor'
+              else 'Removed out-of-policy .NET track ' ~ (item.Track | default('?')) ~ ' (exclusive mode)'
+            )
+          }
+        ]
+      }}
+  loop: "{{ dotnet_sweep_vendor_list | default([]) }}"
+  loop_control:
+    label: "{{ item.DisplayName | default('.NET vendor install') }}"
+  when:
+    - dotnet_sweep_vendor_remove.changed | default(false) | bool
+  changed_when: false

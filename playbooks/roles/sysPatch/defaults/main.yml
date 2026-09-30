@@ -1,0 +1,230 @@
+# defaults/main.yml -- sysPatch role
+#
+# Maintenance-window orchestration for an application server. The role runs the
+# patch sequence, then verifies that the host's application stack came back up.
+# Everything that changes state is opt-in, so an unqualified run is always a
+# read-only verification.
+#
+# The role is deliberately generic. It ships NO host-specific knowledge. A
+# system is onboarded by creating an inventory directory for it and supplying
+# syspatch_verify in that directory's group_vars. Survey a candidate host first
+# with files/discover_host.ps1, which prints a ready-to-paste catalog.
+#
+# Windows Update is not implemented here. It is delegated to the winUpdate role
+# so the same update logic serves hosts that are not in a maintenance window.
+#
+# Mode is selected on the CLI:
+#   --extra-vars "maintenance=verify_only"
+#   --extra-vars "maintenance=prestage"
+#   --extra-vars "maintenance=patch"
+#   --extra-vars "maintenance=full"
+
+# ---------------------------------------------------------------------------
+# Mode
+# ---------------------------------------------------------------------------
+# verify_only  read-only. Runs the verification catalog only. This is the
+#              default so a bare run can never change a host.
+# prestage     business-hours safe preparation. Preflight, download updates
+#              without installing them, and preview the firmware set. Nothing
+#              is installed, nothing restarts, no service is interrupted. Run
+#              this during the day so the off-hours window is short.
+# patch        preflight, install updates, then run the vendor firmware tool.
+#              No reboot. A required reboot is reported as an advisory.
+# full         preflight, install updates, firmware, reboot, wait for WinRM,
+#              then the full verification catalog. The complete runbook.
+maintenance: "verify_only"
+
+# ---------------------------------------------------------------------------
+# Change gates
+# ---------------------------------------------------------------------------
+# Confirming in chat that nobody is using the system is a human step and the
+# role does not fake it. It refuses to install or reboot without an explicit
+# acknowledgment, and records that acknowledgment in the report so the window
+# is auditable afterwards.
+#
+#   -e "change_ack=<who confirmed, or the ticket>"
+#
+# prestage does not require this. Downloading updates interrupts nobody.
+syspatch_change_ack: ""
+
+# Off-peak enforcement, applied to patch and full only. prestage is exempt by
+# design, since running it during the day is the point.
+# Override for an approved exception:
+#   -e "syspatch_ignore_window=true"
+syspatch_offpeak_timezone: "America/Los_Angeles"
+syspatch_offpeak_business_start_hour: 9
+syspatch_offpeak_business_end_hour: 17
+syspatch_ignore_window: false
+
+# Reboot authorization. A reboot needs BOTH gates. The operator passes the flag
+# on the run, and the host must appear in the allow list. Two independent gates
+# mean an inventory mistake alone cannot bounce a production box.
+#   -e "syspatch_allow_reboot=true"
+syspatch_allow_reboot: false
+
+# Short names, matched against inventory_hostname_short. Empty blocks every
+# reboot. Populate this in the system's inventory group_vars, not here.
+syspatch_reboot_allowed_hosts: []
+
+syspatch_reboot_timeout: 1800
+syspatch_post_reboot_settle_seconds: 120
+
+# ---------------------------------------------------------------------------
+# Preflight
+# ---------------------------------------------------------------------------
+# Free space on C: required before patching. Set to 0 to skip the check.
+syspatch_min_free_gb: 15
+
+# Interactive logon sessions found on the target. The chat check is the real
+# control; this is the backstop for somebody still signed in at RDP.
+# prestage never blocks on this, since it interrupts nobody.
+syspatch_block_on_active_sessions: true
+
+# ---------------------------------------------------------------------------
+# Windows Update, delegated to the winUpdate role
+# ---------------------------------------------------------------------------
+syspatch_windows_update_enabled: true
+
+# Passed through to winUpdate. Override in inventory group_vars to narrow the
+# scope for a given system, for example to security content only.
+syspatch_update_categories:
+  - SecurityUpdates
+  - CriticalUpdates
+  - UpdateRollups
+  - Updates
+  - DefinitionUpdates
+
+syspatch_update_reject_list: []
+syspatch_update_timeout: 7200
+
+# ---------------------------------------------------------------------------
+# Vendor firmware and driver update
+# ---------------------------------------------------------------------------
+syspatch_dsu_enabled: true
+
+# Skip automatically when the target is not Dell hardware. A non-Dell host
+# records a skipped step rather than an error.
+syspatch_dsu_require_dell: true
+
+# Candidate executables, tried in order. The first one present on the target
+# wins, and the resolved path is recorded in the report. Pin a single path in
+# inventory group_vars once discover_host.ps1 has told you which one is real.
+#   dsu.exe      Dell EMC System Update, the server-class tool
+#   dcu-cli.exe  Dell Command Update, the client-class tool
+syspatch_dsu_candidates:
+  - 'C:\Program Files\Dell\DELL EMC System Update\dsu.exe'
+  - 'C:\Program Files\Dell\DELL EMC System Update\bin\dsu.exe'
+  - 'C:\Program Files (x86)\Dell\UpdatePackage\bin\dsu.exe'
+  - 'C:\Program Files\Dell\CommandUpdate\dcu-cli.exe'
+  - 'C:\Program Files (x86)\Dell\CommandUpdate\dcu-cli.exe'
+
+syspatch_dsu_args_dsu: '--non-interactive --apply-upgrades'
+syspatch_dsu_args_dcu: '/applyUpdates -reboot=disable -silent'
+
+# Preview only. The tool reports what it would apply and changes nothing.
+# prestage forces this on regardless of the setting here.
+syspatch_dsu_audit_only: false
+
+# Exit codes treated as success. The code tables differ between DSU and Dell
+# Command Update and between versions, so this is data rather than a hardcoded
+# assumption. Reboot requirement is read from the registry after the run, never
+# inferred from the exit code.
+syspatch_dsu_success_codes: [0, 1, 5, 500]
+
+syspatch_dsu_timeout: 3600
+
+# ---------------------------------------------------------------------------
+# Verification catalog
+# ---------------------------------------------------------------------------
+# EMPTY BY DESIGN. This is the extension point that makes the role reusable.
+# Define syspatch_verify in the inventory group_vars for each system. Generate
+# a starting catalog by running files/discover_host.ps1 against the host; it
+# prints a filled-in block ready to paste.
+#
+# Common fields on every check:
+#   key        unique short id, used in the JSON and the HTML report
+#   label      display name
+#   type       service | scheduled_task | http | log_freshness | manual
+#   critical   true means a failure fails the run; false means it warns
+#   notes      optional, shown in the report
+#
+# Type-specific fields:
+#   service         name           the service name, not the display name
+#                   state          required state, default Running
+#
+#   scheduled_task  path           full Task Scheduler path including folder,
+#                                  for example '\Nightly Mail'
+#                   require_ready  true means State must be Ready or Running
+#                   max_age_hours  newest allowed LastRunTime age, 0 disables
+#                   expect_result  exit code counted as success, default 0
+#
+#   http            url            the endpoint to probe
+#                   from           target or control, default target
+#                   status         expected status code, default 200
+#                   match          optional string that must appear in the body
+#                   validate_certs default true
+#
+#   log_freshness   path           file or directory on the target
+#                   max_age_hours  newest allowed write age
+#                   match          optional regex the newest file must contain
+#
+#   manual          instruction    what the operator must confirm by hand. The
+#                                  check never passes or fails. It is carried
+#                                  into the report as an action item so the
+#                                  window is not signed off without it.
+#
+# Worked example covering a service, a scheduled job, a web front end, and a
+# human step:
+#
+# syspatch_verify:
+#   - key: app_sql
+#     label: Application SQL Server
+#     type: service
+#     name: 'MSSQLSERVER'
+#     state: Running
+#     critical: true
+#
+#   - key: mail_job
+#     label: Nightly mail job
+#     type: scheduled_task
+#     path: '\Nightly Mail'
+#     require_ready: true
+#     max_age_hours: 24
+#     expect_result: 0
+#     critical: true
+#
+#   - key: front_end
+#     label: Web front end
+#     type: http
+#     url: 'https://example.example.com'
+#     from: target
+#     status: 200
+#     critical: true
+#
+#   - key: email_flow
+#     label: Email flow send and receive
+#     type: manual
+#     critical: true
+#     instruction: 'Confirm mail sends and receives end to end.'
+syspatch_verify: []
+
+# Verification filter. Same sentinel semantics as chocoDeploy's targetSoftware:
+#   null   run the whole syspatch_verify catalog
+#   []     skip verification entirely
+#   [...]  run only the listed check keys
+#
+#   -e '{"targetChecks":["app_sql","front_end"]}'
+targetChecks: null
+
+# Services and scheduled tasks can lag a reboot, so a check is retried before
+# it is called a failure.
+syspatch_verify_retries: 6
+syspatch_verify_delay: 20
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+syspatch_report_enabled: true
+syspatch_report_dir_remote: 'C:\tools\patchlog'
+syspatch_report_dir_local: "{{ chocofleet_data_root }}/LOGS/sysPatch"
+syspatch_report_retain_days: 90

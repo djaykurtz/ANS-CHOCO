@@ -1,0 +1,177 @@
+# tasks/main.yml -- sysPatch role
+# -------------------------------------------------------------------
+# Maintenance-window engine
+# -------------------------------------------------------------------
+# Phase order mirrors the operator runbook:
+#   preflight -> Windows Update -> vendor firmware -> reboot -> verify -> report
+#
+# Windows Update is delegated to the winUpdate role rather than reimplemented,
+# so the same update logic serves hosts outside a maintenance window.
+#
+# Read-only by default. Every phase that changes state is gated, and the report
+# is always written, including on a fatal error.
+
+- name: sysPatch | Validate maintenance mode
+  ansible.builtin.assert:
+    that:
+      - maintenance in ['verify_only', 'prestage', 'patch', 'full']
+    fail_msg: >-
+      Unsupported maintenance '{{ maintenance }}'.
+      Supported values: verify_only, prestage, patch, full
+    quiet: true
+
+- name: sysPatch | Classify the run
+  ansible.builtin.set_fact:
+    # prestage prepares but never installs, so it is not a state change in the
+    # sense the gates care about. It is safe to run during business hours.
+    _sp_prestage: "{{ maintenance == 'prestage' }}"
+    _sp_installs: "{{ maintenance in ['patch', 'full'] }}"
+    _sp_touches_host: "{{ maintenance in ['prestage', 'patch', 'full'] }}"
+    _sp_will_reboot: "{{ maintenance == 'full' }}"
+    _sp_run_ts: "{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}"
+    _sp_ack: "{{ change_ack | default(syspatch_change_ack) | default('', true) }}"
+    # Forward slashes throughout. A backslash path in a double-quoted YAML
+    # scalar gets eaten by escape processing before Ansible ever sees it.
+    _sp_remote_dir_fs: >-
+      {{ syspatch_report_dir_remote | replace('\\', '/') }}
+  changed_when: false
+
+# The runbook's first instruction is to confirm with the application owner and
+# authorized operators that nobody is using the box. That is a human step and the
+# role does not fake it. It refuses to install or reboot without an
+# acknowledgment, and records it so the window is auditable afterwards.
+- name: sysPatch | Require a change acknowledgment before installing anything
+  ansible.builtin.assert:
+    that:
+      - (_sp_ack | trim | length) > 0
+    fail_msg: >-
+      maintenance={{ maintenance }} installs updates and needs an explicit
+      acknowledgment that the application owner and authorized operators
+      confirmed nobody is using {{ inventory_hostname }}. Re-run with
+      -e "change_ack=<who confirmed, or the ticket>". Use maintenance=prestage
+      if you only want to stage the downloads ahead of the window.
+    quiet: true
+  when: _sp_installs | bool
+
+- name: sysPatch | Resolve the current Pacific hour
+  ansible.builtin.set_fact:
+    _sp_pacific_hour: "{{ lookup('pipe', 'TZ=' ~ syspatch_offpeak_timezone ~ ' date +%H') | int }}"
+    _sp_pacific_stamp: "{{ lookup('pipe', 'TZ=' ~ syspatch_offpeak_timezone ~ ' date +%Y-%m-%d_%H:%M_%Z') }}"
+  changed_when: false
+  when: _sp_installs | bool
+
+- name: sysPatch | Enforce the off-peak window
+  ansible.builtin.assert:
+    that:
+      - (_sp_pacific_hour | int) < (syspatch_offpeak_business_start_hour | int) or (_sp_pacific_hour | int) >= (syspatch_offpeak_business_end_hour | int)
+    fail_msg: >-
+      It is {{ _sp_pacific_stamp }}, inside the
+      {{ syspatch_offpeak_business_start_hour }}:00 to {{ syspatch_offpeak_business_end_hour }}:00
+      Pacific business window. Patch work runs off peak. Wait for the window,
+      run maintenance=prestage now to stage the downloads, or re-run with
+      -e "syspatch_ignore_window=true" if this is an approved exception.
+    quiet: true
+  when:
+    - _sp_installs | bool
+    - not (syspatch_ignore_window | bool)
+
+- name: sysPatch | Initialize report state
+  ansible.builtin.set_fact:
+    sp_events: []
+    sp_errors: []
+    sp_fatal: false
+    sp_fatal_message: ''
+    sp_failed_task: ''
+    sp_preflight: {}
+    sp_update_result: {}
+    sp_dsu_result: {}
+    sp_verify_result: {}
+    sp_rebooted: false
+    sp_reboot_advisory: false
+  changed_when: false
+
+- name: sysPatch | Run maintenance workflow
+  block:
+    - name: sysPatch | Ops | Preflight
+      ansible.builtin.import_tasks: ops/preflight.yml
+      when: _sp_touches_host | bool
+      tags: [preflight]
+
+    - name: sysPatch | Ops | Windows Update
+      ansible.builtin.include_tasks: ops/windowsUpdate.yml
+      when:
+        - _sp_touches_host | bool
+        - syspatch_windows_update_enabled | bool
+      tags: [update]
+
+    - name: sysPatch | Ops | Vendor firmware update
+      ansible.builtin.include_tasks: ops/dsu.yml
+      when:
+        - _sp_touches_host | bool
+        - syspatch_dsu_enabled | bool
+      tags: [dsu]
+
+    - name: sysPatch | Ops | Reboot cycle
+      ansible.builtin.include_tasks: ops/rebootCycle.yml
+      when: _sp_will_reboot | bool
+      tags: [reboot]
+
+    - name: sysPatch | Record deferred reboot advisory
+      ansible.builtin.set_fact:
+        sp_reboot_advisory: true
+        sp_events: >-
+          {{
+            sp_events + [{
+              'phase': 'reboot',
+              'action': 'Deferred',
+              'result': 'advisory',
+              'detail': 'A reboot is pending but this mode does not reboot. Schedule one to finish the update.'
+            }]
+          }}
+      when:
+        - maintenance in ['prestage', 'patch']
+        - (sp_dsu_result.reboot_required | default(false) | bool) or (sp_update_result.reboot_required | default(false) | bool)
+      changed_when: false
+
+    - name: sysPatch | Ops | Verify application stack
+      ansible.builtin.include_tasks: ops/verify.yml
+      when:
+        - maintenance != 'prestage'
+        - targetChecks is none or (targetChecks | length) > 0
+      tags: [verify]
+
+  rescue:
+    - name: sysPatch | Capture fatal task context
+      ansible.builtin.set_fact:
+        sp_fatal: true
+        sp_failed_task: "{{ ansible_failed_task.name | default('unknown-task') }}"
+        sp_fatal_message: >-
+          {{
+            ansible_failed_result.msg
+            | default(ansible_failed_result.stderr)
+            | default(ansible_failed_result.stdout)
+            | default('Unhandled fatal error during sysPatch run')
+          }}
+        sp_errors: >-
+          {{
+            sp_errors + [{
+              'phase': (ansible_failed_task.name | default('unknown-task')),
+              'message': (
+                ansible_failed_result.msg
+                | default(ansible_failed_result.stderr)
+                | default(ansible_failed_result.stdout)
+                | default('Unhandled fatal error during sysPatch run')
+              )
+            }]
+          }}
+      changed_when: false
+
+  always:
+    - name: sysPatch | Finalize report
+      ansible.builtin.import_tasks: ops/report.yml
+      when: syspatch_report_enabled | bool
+
+    - name: sysPatch | Re-raise fatal error after report
+      ansible.builtin.fail:
+        msg: "{{ sp_failed_task }}: {{ sp_fatal_message }}"
+      when: sp_fatal | bool

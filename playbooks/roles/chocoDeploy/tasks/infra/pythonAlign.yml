@@ -1,0 +1,353 @@
+---
+# infra/pythonAlign.yml
+# Align a specific Python track under Chocolatey.
+# Runtime alignment is opt-in through targetRuntimes.
+# In choco_conversion, only align when the requested track is already present.
+# In choco_update, only align when Chocolatey already owns the runtime.
+# In choco_baseline, install or align the targeted runtime.
+#
+# Multi-track: this task is invoked once per entry in
+# choco_python_tracks_to_align (produced by infra/pythonResolve.yml). Each
+# invocation receives python_track_item with track, min_version, and pkg.
+#
+# Vendor cleanup is opt-in via python_cleanup_vendor and only removes vendor
+# python installs whose major.minor matches the track being aligned. Wider
+# sweeps (other unmanaged tracks) are handled by infra/pythonSweep.yml.
+
+- name: pythonAlign | Reset per-iteration state
+  ansible.builtin.set_fact:
+    python_vendor_list: []
+    python_vendor_present: false
+    python_should_align: false
+    python_choco_ok: false
+    python_install: {}
+    python_vendor_remove: {}
+  changed_when: false
+
+- name: pythonAlign | Set track variables
+  ansible.builtin.set_fact:
+    python_track: "{{ python_track_item.track }}"
+    python_version: "{{ python_track_item.min_version }}"
+    python_pkg: "{{ python_track_item.pkg }}"
+    python_cleanup_vendor: "{{ python_cleanup_vendor | default(false) | bool }}"
+    python_cleanup_aliases: "{{ python_cleanup_aliases | default(false) | bool }}"
+    python_audit_only: "{{ python_audit_only | default(false) | bool }}"
+  changed_when: false
+
+- name: pythonAlign | Resolve Chocolatey source for this package
+  ansible.builtin.set_fact:
+    python_source_name: >-
+      {{
+        trusted_choco_source.name
+        if (python_pkg in (choco_internalized_package_ids | default(chocoInternalRepo | default([]))))
+        else (
+          (choco_public_source_effective | default(choco_public_source_name | default('chocolatey')))
+          if (choco_explicit_source_routing | default(true) | bool)
+          else ''
+        )
+      }}
+  changed_when: false
+
+- name: pythonAlign | Validate requested track and version policy
+  ansible.builtin.assert:
+    that:
+      - python_track is match('^[0-9]+\.[0-9]+$')
+      - python_version is match('^' ~ (python_track | regex_escape) ~ '\.[0-9]+')
+    fail_msg: >-
+      pythonAlign: track/version inconsistency.
+      track={{ python_track }}, min_version={{ python_version }}.
+        Example valid pairing: track=3.13 with min_version=3.13.5
+    quiet: true
+  changed_when: false
+
+- name: pythonAlign | Read package presence from inventory map
+  ansible.builtin.set_fact:
+    python_choco_present: "{{ choco_installed_map[python_pkg] is defined }}"
+    python_choco_version: "{{ choco_installed_map[python_pkg] | default('') }}"
+  changed_when: false
+
+- name: pythonAlign | Determine if Chocolatey already owns the desired version
+  ansible.builtin.set_fact:
+    python_choco_ok: "{{ python_choco_present and (python_choco_version is version(python_version, '>=')) }}"
+  changed_when: false
+
+- name: pythonAlign | Discover non-Chocolatey Python installs for this track
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $track = '{{ python_track }}'
+    $hits = @()
+    $paths = @(
+      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    foreach ($p in $paths) {
+      Get-ItemProperty $p |
+        Where-Object {
+          $_.DisplayName -match ('^Python\s+' + [regex]::Escape($track) + '(\D|$)') -and
+          $_.Publisher -notmatch 'Chocolatey'
+        } |
+        ForEach-Object {
+          $hits += [pscustomobject]@{
+            DisplayName          = $_.DisplayName
+            DisplayVersion       = $_.DisplayVersion
+            UninstallString      = $_.UninstallString
+            QuietUninstallString = $_.QuietUninstallString
+            ProductCode          = $_.PSChildName
+          }
+        }
+    }
+    $hits | ConvertTo-Json -Compress
+  register: python_vendor_raw
+  changed_when: false
+  failed_when: false
+  when:
+    - not python_choco_ok
+    - deployment == 'choco_conversion' or python_cleanup_vendor | bool
+
+- name: pythonAlign | Parse vendor inventory results
+  ansible.builtin.set_fact:
+    python_vendor_list: >-
+      {%- set raw = python_vendor_raw.stdout | default('') | trim -%}
+      {%- if raw | length == 0 -%}
+        []
+      {%- else -%}
+        {%- set parsed = raw | from_json -%}
+        {%- if parsed is mapping -%}
+          {{ [parsed] }}
+        {%- else -%}
+          {{ parsed }}
+        {%- endif -%}
+      {%- endif -%}
+  when:
+    - not python_choco_ok
+    - deployment == 'choco_conversion' or python_cleanup_vendor | bool
+  changed_when: false
+
+- name: pythonAlign | Determine runtime alignment scope
+  # See dotnetAlign for the corresponding logic. Floor onboarding override:
+  # when floor_required=true AND this iteration is processing the floor
+  # track (min_supported_track), align even if not present in choco or
+  # vendor inventory. This matches the docs' "mixed-fleet onboarding"
+  # behavior - the floor track gets installed on hosts with no Python.
+  ansible.builtin.set_fact:
+    python_vendor_present: "{{ (python_vendor_list | default([]) | length) > 0 }}"
+    python_should_align: >-
+      {{
+        (deployment == 'choco_baseline')
+        or ((deployment == 'choco_update') and python_choco_present)
+        or ((deployment == 'choco_conversion') and (python_choco_present or ((python_vendor_list | default([]) | length) > 0)))
+        or (
+          (choco_python_floor_required | default(false) | bool)
+          and (python_track == (choco_python_min_supported_track | default('')))
+        )
+      }}
+  changed_when: false
+
+- name: pythonAlign | Skip runtime - not present for requested deployment
+  ansible.builtin.debug:
+    msg: >-
+      pythonAlign: SKIP - track {{ python_track }} not present and deployment={{ deployment }} does not add new runtime installs.
+  when:
+    - not python_should_align
+    - choco_deploy_console_verbose | default(false) | bool
+  changed_when: false
+
+- name: pythonAlign | OK - target track already aligned
+  ansible.builtin.debug:
+    msg: >-
+      pythonAlign: OK - {{ python_pkg }} {{ python_choco_version }} satisfies
+      track {{ python_track }} (min={{ python_version }})
+  when:
+    - python_choco_ok
+    - choco_deploy_console_verbose | default(false) | bool
+  changed_when: false
+
+- name: pythonAlign | Record no-change audit event
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': 'NoChange',
+            'software': python_pkg,
+            'previous_version': python_choco_version,
+            'new_version': python_choco_version,
+            'source': 'chocolatey',
+            'notes': 'Already aligned at or above minimum ' ~ python_version ~ ' on track ' ~ python_track
+          }
+        ]
+      }}
+  when: python_choco_ok
+  changed_when: false
+
+- name: pythonAlign | Remove vendor Python installs for this track
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $itemsJson = @'
+    {{ python_vendor_list | to_json }}
+    '@
+    $items = @()
+    if ($itemsJson.Trim()) {
+      $parsed = $itemsJson | ConvertFrom-Json
+      if ($parsed -is [System.Array]) {
+        $items = $parsed
+      } elseif ($null -ne $parsed) {
+        $items = @($parsed)
+      }
+    }
+
+    foreach ($i in $items) {
+      if ($i.ProductCode -match '^\{?[0-9A-Fa-f\-]{36}\}?$') {
+        $code = $i.ProductCode
+        if ($code -notmatch '^\{') { $code = '{' + $code + '}' }
+        Start-Process -FilePath msiexec.exe -ArgumentList @('/x', $code, '/qn', '/norestart') -Wait | Out-Null
+        continue
+      }
+      if ($i.QuietUninstallString) { cmd.exe /c $i.QuietUninstallString | Out-Null; continue }
+      if ($i.UninstallString)      { cmd.exe /c $i.UninstallString      | Out-Null; continue }
+    }
+
+    "RemovedCandidates=$($items.Count)"
+  register: python_vendor_remove
+  changed_when: true
+  failed_when: false
+  when:
+    - python_should_align
+    - not python_choco_ok
+    - python_cleanup_vendor | bool
+    - not python_audit_only | bool
+    - (python_vendor_list | default([]) | length) > 0
+
+- name: pythonAlign | Install/upgrade Python via Chocolatey
+  # state selection:
+  #   - Fresh install (track not present in choco inventory): state=present
+  #     pinned to the catalog channel min_version.
+  #   - In-channel upgrade (choco already owns this track but below floor):
+  #     state=latest. The win_chocolatey module's state=present + version=X
+  #     path treats "any version installed" as a no-op and never invokes
+  #     choco upgrade, even with force=true. state=latest is the idiomatic
+  #     upgrade path; we rely on the catalog floor to pre-stage the feed so
+  #     latest >= python_version.
+  chocolatey.chocolatey.win_chocolatey:
+    name: "{{ python_pkg }}"
+    version: "{{ python_version if (python_version | length > 0 and not python_choco_present) else omit }}"
+    source: "{{ python_source_name if (python_source_name | length > 0) else omit }}"
+    state: "{{ 'latest' if python_choco_present else 'present' }}"
+    force: "{{ choco_force_install | default(true) | bool }}"
+    ignore_checksums: "{{ choco_ignore_checksums | default(true) | bool }}"
+    timeout: "{{ choco_deploy_install_timeout_medium | default(900) | int }}"
+  register: python_install
+  failed_when: false
+  timeout: "{{ choco_deploy_task_timeout_medium | default(1080) | int }}"
+  when:
+    - python_should_align
+    - not python_choco_ok
+    - not python_audit_only | bool
+
+- name: pythonAlign | Re-query Chocolatey for verification
+  ansible.windows.win_command: >
+    choco list --local-only --limit-output {{ python_pkg }}
+  register: python_verify
+  changed_when: false
+  failed_when: false
+  when:
+    - python_should_align
+    - not python_choco_ok
+
+- name: pythonAlign | Assert final state
+  ansible.builtin.assert:
+    that:
+      - (python_verify.stdout | default('') | trim) is search('^' ~ python_pkg ~ '\|')
+      - ((python_verify.stdout | default('') | trim).split('|')[-1] | trim) is version(python_version, '>=')
+      - ((python_verify.stdout | default('') | trim).split('|')[-1] | trim) is match('^' ~ (python_track | regex_escape) ~ '\.[0-9]+')
+    fail_msg: >-
+      pythonAlign: FAILED - expected {{ python_pkg }} on track {{ python_track }}
+      at or above {{ python_version }}, got {{ python_verify.stdout | default('') | trim }}
+    quiet: true
+  when:
+    - python_should_align
+    - not python_choco_ok
+    - not python_audit_only | bool
+    - not (python_install.failed | default(false) | bool)
+
+- name: pythonAlign | Record removed vendor Python installs in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': 'Removed',
+            'software': (item.DisplayName | default('Python vendor install')),
+            'previous_version': (item.DisplayVersion | default('')),
+            'new_version': '',
+            'source': 'vendor',
+            'notes': 'Python runtime conversion cleanup (track ' ~ python_track ~ ')'
+          }
+        ]
+      }}
+  loop: "{{ python_vendor_list | default([]) }}"
+  loop_control:
+    label: "{{ item.DisplayName | default('Python vendor install') }}"
+  when: python_vendor_remove.changed | default(false) | bool
+  changed_when: false
+
+- name: pythonAlign | Record Python package change in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': ('Converted' if ((python_vendor_present | default(false)) and (not python_choco_present)) else ('Upgraded' if python_choco_present else 'Installed')),
+            'software': python_pkg,
+            'previous_version': (python_choco_version if python_choco_present else ''),
+            'new_version': ((python_verify.stdout | default('') | trim).split('|')[-1] | trim),
+            'source': 'chocolatey',
+            'notes': (
+              ('Python runtime converted to Chocolatey management; track ' ~ python_track)
+              if ((python_vendor_present | default(false)) and (not python_choco_present))
+              else ('Python runtime alignment track ' ~ python_track)
+            )
+          }
+        ]
+      }}
+  when:
+    - python_install.changed | default(false) | bool
+    - not (python_install.failed | default(false) | bool)
+  changed_when: false
+
+- name: pythonAlign | Record install error if Chocolatey reported failure
+  ansible.builtin.set_fact:
+    choco_deploy_report_errors: >-
+      {{
+        choco_deploy_report_errors + [
+          {
+            'software': python_pkg,
+            'operation': 'install',
+            'message': (
+              python_install.msg
+              | default(python_install.stderr)
+              | default(python_install.stdout)
+              | default('Chocolatey reported failure installing ' ~ python_pkg)
+            )
+          }
+        ]
+      }}
+  when:
+    - python_install.failed | default(false) | bool
+  changed_when: false
+
+- name: pythonAlign | Summary
+  ansible.builtin.debug:
+    msg: >-
+      pythonAlign summary:
+      should_align={{ python_should_align }},
+      track={{ python_track }},
+      pkg={{ python_pkg }},
+      target_min={{ python_version }},
+      ok_pre={{ python_choco_ok }},
+      vendor_present={{ python_vendor_present | default(false) }},
+      vendor_candidates={{ (python_vendor_list | default([])) | length }},
+      vendor_removed={{ python_vendor_remove.changed | default(false) | bool }},
+      choco_changed={{ python_install.changed | default(false) }}
+  when: choco_deploy_console_verbose | default(false) | bool
+  changed_when: false

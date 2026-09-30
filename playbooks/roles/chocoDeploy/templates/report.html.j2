@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chocoDeploy &ndash; {{ inventory_hostname }}</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  line-height: 1.6;
+  font-size: 17px;
+  padding: 2rem;
+}
+.wrap { max-width: 960px; margin: 0 auto; }
+header {
+  background: #0078d4;
+  color: #fff;
+  padding: 0.75rem 2rem;
+  border-radius: 8px 8px 0 0;
+}
+header h1 { font-size: 1.4rem; font-weight: 600; }
+.meta { margin-top: 0.3rem; font-size: 1rem; opacity: 0.9; }
+.meta span { display: inline-block; margin-right: 2rem; }
+.meta .system-name { font-size: 1.2rem; font-weight: 600; }
+.stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 1.25rem 2rem;
+  background: #252526;
+  border-bottom: 1px solid #3c3c3c;
+  justify-content: center;
+}
+.stat {
+  text-align: center;
+  padding: 0.6rem 1.25rem;
+  border-radius: 6px;
+  min-width: 115px;
+}
+.stat .count { font-size: 1.85rem; font-weight: 700; }
+.stat .label { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.stat-converted { background: #332b1a; color: #ce9178; }
+.stat-installed { background: #1a2733; color: #569cd6; }
+.stat-upgraded  { background: #2d2244; color: #c586c0; }
+.stat-compliant { background: #1a2e1a; color: #6a9955; }
+.stat-removed   { background: #3a1a1a; color: #f48771; }
+.reboot-indicator {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 115px;
+  padding: 0.6rem 1.25rem;
+  border-radius: 6px;
+}
+.reboot-indicator .power-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 2px solid;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  font-weight: 700;
+  margin: 0.15rem 0;
+}
+.reboot-indicator.reboot-cosmetic .power-icon { border-color: #fff; color: #fff; background: #1e1e1e; }
+.reboot-indicator.reboot-cosmetic { background: #1e1e1e; color: #fff; }
+.reboot-indicator.reboot-actionable .power-icon { border-color: #f44747; color: #f44747; background: #1e1e1e; }
+.reboot-indicator.reboot-actionable { background: #4a1a1a; color: #f44747; }
+.reboot-indicator.reboot-clear .power-icon { border-color: #1e1e1e; color: #1e1e1e; background: #fff; }
+.reboot-indicator.reboot-clear { background: #fff; color: #1e1e1e; }
+.reboot-indicator .label { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; text-align: center; line-height: 1.2; }
+section {
+  background: #252526;
+  padding: 0.6rem 2rem;
+  border-bottom: 1px solid #3c3c3c;
+}
+section:last-of-type {
+  border-radius: 0 0 8px 8px;
+  border-bottom: none;
+}
+h2 { font-size: 1.25rem; margin-bottom: 0.4rem; color: #e0e0e0; }
+h3 { font-size: 1.1rem; margin-bottom: 0.3rem; color: #d4d4d4; }
+table { width: 100%; border-collapse: collapse; font-size: 1.06rem; }
+th {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  background: #2d2d2d;
+  border-bottom: 2px solid #3c3c3c;
+  font-weight: 600;
+  color: #569cd6;
+}
+td { padding: 0.5rem 0.75rem; border-bottom: 1px solid #333; color: #d4d4d4; }
+tr:nth-child(even) td { background: #2a2a2a; }
+.none { color: #6a6a6a; font-style: italic; padding: 0.2rem 0; font-size: 1rem; }
+dl {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 0.25rem 1rem;
+  font-size: 1.06rem;
+}
+dt { font-weight: 600; color: #9cdcfe; }
+dd { word-break: break-all; color: #d4d4d4; }
+.command {
+  font-family: 'Cascadia Code', Consolas, 'Courier New', monospace;
+  font-size: 0.9rem;
+  background: #1e1e1e;
+  color: #ce9178;
+  padding: 0.75rem;
+  border-radius: 4px;
+  border: 1px solid #3c3c3c;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin-top: 0.5rem;
+}
+.reboot-yes { color: #ffd700; font-weight: 600; }
+.reboot-no  { color: #89d185; }
+.pass-label { color: #c586c0; font-weight: 600; white-space: nowrap; }
+footer {
+  text-align: center;
+  padding: 1rem;
+  font-size: 0.75rem;
+  color: #6a6a6a;
+}
+</style>
+</head>
+<body>
+{% set runs = choco_deploy_daily_runs | default([choco_deploy_report_run_data]) %}
+{% set ordinals = ['1st', '2nd', '3rd', '4th', '5th', '6th', '7th', '8th', '9th', '10th'] %}
+{% set ns = namespace(total_converted=0, total_installed=0, total_upgraded=0, total_compliant=0, total_removed=0, total_errors=0) %}
+{% set ns_all = namespace(all_converted=[], all_installed=[], all_upgraded=[], all_compliant=[], all_removed=[], all_errors=[]) %}
+{% for run in runs %}
+{% set pass_name = (ordinals[loop.index0] if loop.index0 < ordinals | length else (loop.index ~ 'th')) ~ ' Pass' %}
+{% set events = run.events | default([]) %}
+{% set errors = run.errors | default([]) %}
+{% set converted = events | selectattr('action', 'equalto', 'Converted') | list %}
+{% set vendor_removals = events | selectattr('action', 'equalto', 'Removed') | selectattr('notes', 'defined') | selectattr('notes', 'search', 'Converted to Chocolatey') | list %}
+{% set policy_removals_raw = events | selectattr('action', 'equalto', 'Removed') | rejectattr('notes', 'search', 'Converted to Chocolatey') | list %}
+{% set installed = events | selectattr('action', 'equalto', 'Installed') | list %}
+{% set upgraded = events | selectattr('action', 'equalto', 'Upgraded') | list %}
+{% set compliant = events | selectattr('action', 'equalto', 'NoChange') | list %}
+{% set ns.total_converted = ns.total_converted + (converted | length) %}
+{% set ns.total_installed = ns.total_installed + (installed | length) %}
+{% set ns.total_upgraded = ns.total_upgraded + (upgraded | length) %}
+{% set ns.total_compliant = ns.total_compliant + (compliant | length) %}
+{% set ns.total_errors = ns.total_errors + (errors | length) %}
+{% for item in converted %}
+{% set ns_all.all_converted = ns_all.all_converted + [item | combine({'_pass': pass_name, '_vr': vendor_removals | selectattr('notes', 'search', item.software) | map(attribute='software') | list})] %}
+{% endfor %}
+{% for item in installed %}
+{% set ns_all.all_installed = ns_all.all_installed + [item | combine({'_pass': pass_name})] %}
+{% endfor %}
+{% for item in upgraded %}
+{% set ns_all.all_upgraded = ns_all.all_upgraded + [item | combine({'_pass': pass_name})] %}
+{% endfor %}
+{% for item in compliant %}
+{% set ns_all.all_compliant = ns_all.all_compliant + [item | combine({'_pass': pass_name})] %}
+{% endfor %}
+{% set choco_removed_keys = policy_removals_raw | selectattr('source', 'equalto', 'chocolatey') | map(attribute='software') | list %}
+{% for item in policy_removals_raw %}
+{% if item.source | default('') == 'chocolatey' %}
+{% set vendor_extras = policy_removals_raw | selectattr('source', 'equalto', 'vendor') | selectattr('notes', 'equalto', item.notes | default('')) | map(attribute='software') | list %}
+{% set ns_all.all_removed = ns_all.all_removed + [item | combine({'_pass': pass_name, '_vendor_also': vendor_extras})] %}
+{% elif (item.notes | default('') | regex_replace('^Always-remove policy ', '')) not in choco_removed_keys %}
+{% set ns_all.all_removed = ns_all.all_removed + [item | combine({'_pass': pass_name, '_vendor_also': []})] %}
+{% endif %}
+{% endfor %}
+{% set ns.total_removed = ns.total_removed + (ns_all.all_removed | length) %}
+{% for item in errors %}
+{% set ns_all.all_errors = ns_all.all_errors + [item | combine({'_pass': pass_name})] %}
+{% endfor %}
+{% endfor %}
+{% set last_run = runs[-1] %}
+
+<div class="wrap">
+
+<header>
+<h1>chocoDeploy Report</h1>
+<div class="meta">
+<span class="system-name"><strong>System:</strong> {{ inventory_hostname | e }}</span>
+<span><strong>Passes:</strong> {{ runs | length }}</span>
+<span><strong>Date:</strong> {{ choco_deploy_report_date_utc }}</span>
+</div>
+</header>
+
+<div class="stats">
+<div class="stat stat-upgraded"><div class="count">{{ ns.total_upgraded }}</div><div class="label">Upgraded</div></div>
+<div class="stat stat-installed"><div class="count">{{ ns.total_installed }}</div><div class="label">Installed</div></div>
+<div class="stat stat-removed"><div class="count">{{ ns.total_removed }}</div><div class="label">Removed</div></div>
+<div class="stat stat-converted"><div class="count">{{ ns.total_converted }}</div><div class="label">Converted</div></div>
+<div class="stat stat-compliant"><div class="count">{{ ns.total_compliant }}</div><div class="label">Compliant</div></div>
+{% set _reboot_pending = last_run.pending_reboot | default(false) | bool %}
+{% set _reboot_actionable = last_run.pending_reboot_actionable | default(last_run.Actionable | default(false)) | bool %}
+<div class="reboot-indicator {{ 'reboot-actionable' if (_reboot_pending and _reboot_actionable) else ('reboot-cosmetic' if _reboot_pending else 'reboot-clear') }}">
+<div class="label">Pending Reboot</div>
+<div class="power-icon">&#x23FB;</div>
+<div class="label">{{ 'Yes !' if (_reboot_pending and _reboot_actionable) else ('Yes ...' if _reboot_pending else 'No') }}</div>
+</div>
+</div>
+
+<section>
+<h2>Upgraded</h2>
+{% if ns_all.all_upgraded | length > 0 %}
+<table>
+<thead><tr><th>Session</th><th>Software</th><th>Previous</th><th>New</th><th>Source</th></tr></thead>
+<tbody>
+{% for item in ns_all.all_upgraded %}
+<tr>
+<td class="pass-label">{{ item._pass }}</td>
+<td>{{ item.software | e }}</td>
+<td>{{ item.previous_version | default('') | e }}</td>
+<td>{{ item.new_version | default('') | e }}</td>
+<td>{{ item.source | default('') | e }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p class="none">None</p>
+{% endif %}
+</section>
+
+<section>
+<h2>Installed (net new)</h2>
+{% if ns_all.all_installed | length > 0 %}
+<table>
+<thead><tr><th>Session</th><th>Software</th><th>Version</th><th>Source</th></tr></thead>
+<tbody>
+{% for item in ns_all.all_installed %}
+<tr>
+<td class="pass-label">{{ item._pass }}</td>
+<td>{{ item.software | e }}</td>
+<td>{{ item.new_version | default('') | e }}</td>
+<td>{{ item.source | default('') | e }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p class="none">None</p>
+{% endif %}
+</section>
+
+<section>
+<h2>Removed (policy)</h2>
+{% if ns_all.all_removed | length > 0 %}
+<table>
+<thead><tr><th>Session</th><th>Software</th><th>Version</th><th>Details</th></tr></thead>
+<tbody>
+{% for item in ns_all.all_removed %}
+<tr>
+<td class="pass-label">{{ item._pass }}</td>
+<td>{{ item.software | e }}</td>
+<td>{{ item.previous_version | default('') | e }}</td>
+<td>{% if item._vendor_also | default([]) | length > 0 %}also removed vendor: {{ item._vendor_also | join(', ') | e }}{% endif %}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p class="none">None</p>
+{% endif %}
+</section>
+
+<section>
+<h2>Converted (vendor &rarr; Chocolatey)</h2>
+{% if ns_all.all_converted | length > 0 %}
+<table>
+<thead><tr><th>Session</th><th>Vendor Removed</th><th></th><th>Chocolatey Package</th><th>Version</th></tr></thead>
+<tbody>
+{% for item in ns_all.all_converted %}
+<tr>
+<td class="pass-label">{{ item._pass }}</td>
+<td>{{ item._vr | join(', ') | e if (item._vr | length > 0) else '&mdash;' }}</td>
+<td>&rarr;</td>
+<td>{{ item.software | e }}</td>
+<td>{{ item.new_version | default('') | e }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p class="none">None</p>
+{% endif %}
+</section>
+
+<section>
+<h2>Detected Compliant</h2>
+{% if ns_all.all_compliant | length > 0 %}
+<table>
+<thead><tr><th>Session</th><th>Software</th><th>Version</th><th>Source</th></tr></thead>
+<tbody>
+{% for item in ns_all.all_compliant %}
+<tr>
+<td class="pass-label">{{ item._pass }}</td>
+<td>{{ item.software | e }}</td>
+<td>{{ item.previous_version | default('') | e }}</td>
+<td>{{ item.source | default('') | e }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p class="none">None</p>
+{% endif %}
+</section>
+
+<section>
+<h2>Errors &amp; Advisories</h2>
+{% if ns_all.all_errors | length > 0 %}
+<table>
+<thead><tr><th>Session</th><th>Software</th><th>Operation</th><th>Message</th></tr></thead>
+<tbody>
+{% for item in ns_all.all_errors %}
+<tr>
+<td class="pass-label">{{ item._pass }}</td>
+<td>{{ item.software | default('') | e }}</td>
+<td>{{ item.operation | default('') | e }}</td>
+<td style="max-width:400px;overflow-wrap:break-word">{{ item.message | default('') | e }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% else %}
+<p class="none">None</p>
+{% endif %}
+</section>
+
+{# Per-user Python (HKEY_USERS) findings - structured detail backing the python-hku advisory.
+   Only renders when at least one pass found per-user Python installs. Read-only; the role
+   does NOT remove these. Use this section to identify hosts needing follow-up. #}
+{% set ns_hku = namespace(any=false, rows=[]) %}
+{% for run in runs %}
+  {% set pass_name = (ordinals[loop.index0] if loop.index0 < ordinals | length else (loop.index ~ 'th')) ~ ' Pass' %}
+  {% set hku = (run.advisories | default({})).python_hku | default({}) %}
+  {% for f in hku.findings | default([]) %}
+    {% set ns_hku.any = true %}
+    {% set ns_hku.rows = ns_hku.rows + [f | combine({'_pass': pass_name, '_hives': hku.loaded_user_hives | default(0)})] %}
+  {% endfor %}
+{% endfor %}
+{% if ns_hku.any %}
+<section>
+<h2>Per-user Python detected (HKEY_USERS)</h2>
+<p class="none" style="margin-bottom:0.5rem">These installs live in per-user registry hives and are NOT removed by the HKLM-based sweep. Read-only advisory; remove by hand or extend the role with explicit per-user sweep support.</p>
+<table>
+<thead><tr><th>Session</th><th>User</th><th>SID</th><th>Display Name</th><th>Track</th><th>Version</th><th>Install Location</th></tr></thead>
+<tbody>
+{% for f in ns_hku.rows %}
+<tr>
+<td class="pass-label">{{ f._pass }}</td>
+<td>{{ f.user | default('(unresolved)') | e }}</td>
+<td style="font-family:'Cascadia Code',Consolas,monospace;font-size:0.78rem">{{ f.sid | default('') | e }}</td>
+<td>{{ f.displayName | default('') | e }}</td>
+<td>{{ f.track | default('') | e }}</td>
+<td>{{ f.displayVersion | default('') | e }}</td>
+<td style="font-family:'Cascadia Code',Consolas,monospace;font-size:0.78rem">{{ f.installLocation | default('') | e }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</section>
+{% endif %}
+
+<section>
+<h2>Session(s)</h2>
+<table>
+<thead><tr><th>Session</th><th>Timestamp</th><th>Mode</th></tr></thead>
+<tbody>
+{% for run in runs %}
+{% set pass_name = (ordinals[loop.index0] if loop.index0 < ordinals | length else (loop.index ~ 'th')) ~ ' Pass' %}
+<tr>
+<td class="pass-label">{{ pass_name }}</td>
+<td>{{ run.report_time | default('') }}</td>
+<td>{{ run.deployment | default('') | e }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>Diagnostics</h2>
+<table>
+<thead><tr><th>Session</th><th>Target Software</th><th>Detected</th><th>Processing</th><th>Remove</th><th>Runtimes</th></tr></thead>
+<tbody>
+{% for run in runs %}
+{% set pass_name = (ordinals[loop.index0] if loop.index0 < ordinals | length else (loop.index ~ 'th')) ~ ' Pass' %}
+<tr>
+<td class="pass-label">{{ pass_name }}</td>
+<td>{{ run.diagnostics.target_software | default('') | e }}</td>
+<td>{{ run.diagnostics.detected_software | default('') | e }}</td>
+<td>{{ run.diagnostics.processing_software | default('') | e }}</td>
+<td>{{ run.diagnostics.remove_software | default('') | e }}</td>
+<td>{{ run.diagnostics.target_runtimes | default('') | e }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</section>
+
+<section>
+<h2>Ansible Commands</h2>
+{% for run in runs %}
+{% set pass_name = (ordinals[loop.index0] if loop.index0 < ordinals | length else (loop.index ~ 'th')) ~ ' Pass' %}
+<p class="pass-label" style="margin-top:0.4rem">{{ pass_name }}</p>
+<div class="command">{{ run.diagnostics.ansible_command | default('') | e }}</div>
+{% endfor %}
+</section>
+
+<footer>Generated by chocoDeploy &middot; {{ choco_deploy_report_timestamp_utc }}</footer>
+
+</div>
+
+<script type="application/json" id="chocoDeploy-data">
+{{ runs | to_json(indent=2) }}
+</script>
+</body>
+</html>

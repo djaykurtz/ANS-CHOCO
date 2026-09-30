@@ -1,0 +1,25 @@
+# playbooks/chocoDeploy.yml
+#
+# Fleet-host Chocolatey alignment. Set -e "deployment=<mode>".
+# Modes: choco_conversion | choco_update | choco_baseline | choco_selective | report_only
+#
+# Operator docs:
+#   docs/deploy/chocoDeploy_QuickRef.md   (run patterns)
+#   docs/deploy/chocoDeploy_Guide.md      (architecture + policy)
+# Mirror .nupkg`s are produced by playbooks/chocoBuild.yml (sibling role).
+---
+- name: Chocolatey deployment
+  hosts: basic_hosts
+  collections:
+    - community.windows
+
+  module_defaults:
+    ansible.builtin.setup:
+      gather_timeout: 30
+
+  vars_files:
+    - "{{ playbook_dir }}/catalogs/chocolatey_packages.yml"
+    - "{{ playbook_dir }}/../vault/corp-ans-secret.yml"
+
+  roles:
+    - chocoDeploy

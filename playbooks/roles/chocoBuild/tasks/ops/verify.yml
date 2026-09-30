@@ -1,0 +1,7 @@
+---
+# Phase 4 placeholder - sanity-check a freshly-built .nupkg: extract
+# it, confirm the install script doesn't reference any live URLs,
+# confirm tools/files/ contents are present and named correctly.
+- name: chocoBuild ops/verify | NOT YET IMPLEMENTED (Phase 4)
+  ansible.builtin.fail:
+    msg: "ops/verify.yml is a Phase 4 stub."

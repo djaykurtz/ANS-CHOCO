@@ -1,0 +1,760 @@
+# chocoDeploy role defaults. Explained in docs/deploy/chocoDeploy_Guide.md
+# ("Role defaults reference").
+
+# choco_conversion|choco_update|choco_baseline|choco_selective|report_only
+deployment: "choco_conversion"
+
+# null = full default catalog, [] = no apps, [...] = only the listed apps
+targetSoftware: null
+
+# null = full removal catalog, [] = skip removal, [...] = only listed entries
+removeSoftware: null
+
+# Legacy key, still honored
+alwaysRemoveSoftware: []
+
+# [] = no runtime alignment; list runtime keys to align them
+targetRuntimes: []
+
+# Reports
+choco_deploy_report_enabled: true
+choco_deploy_report_dir: "{{ chocofleet_data_root }}/LOGS/chocoDeploy"
+choco_deploy_local_report_enabled: true
+choco_deploy_local_report_dir: 'C:\tools\chocolog'
+choco_deploy_local_report_acl_enabled: true
+choco_deploy_local_report_acl_principal: 'Authenticated Users'
+choco_deploy_local_report_acl_rights: 'Modify'
+choco_deploy_local_report_retain_days: 90
+choco_deploy_console_summary_enabled: true
+choco_deploy_console_verbose: false
+choco_deploy_console_show_full_report: false
+
+# End-of-run reboot: never | always | if_needed
+choco_deploy_reboot: "never"
+choco_deploy_reboot_timeout: 600
+choco_deploy_reboot_msg: "chocoDeploy: Scheduled reboot after software alignment."
+
+# Install timeouts (seconds) by install_size; task caps sit slightly above them
+choco_deploy_install_timeout: 900            # legacy fallback for unsized callers
+choco_deploy_install_timeout_small: 300      # 5 min
+choco_deploy_install_timeout_medium: 900     # 15 min
+choco_deploy_install_timeout_large: 2700     # 45 min
+choco_deploy_task_timeout_small: 360         # 6 min
+choco_deploy_task_timeout_medium: 1080       # 18 min
+choco_deploy_task_timeout_large: 3000        # 50 min
+
+# Wait for a vendor uninstall to clear the registry before the choco install
+choco_deploy_vendor_verify_retries: 12
+choco_deploy_vendor_verify_delay: 5          # seconds between retries (60s total budget)
+
+# Delete today's reports on the target before writing this run's report
+choco_deploy_reset_daily: false
+
+# Pending reboot handling
+choco_deploy_skip_pending_reboot: false
+choco_deploy_pending_reboot_inventory: "{{ choco_deploy_report_dir }}/pending_reboot_hosts.yml"
+
+# Chocolatey install flags
+choco_ignore_checksums: true
+choco_force_install: false
+
+# Approved version floors (master pin reference). Change only by promoting a
+# validated test pin.
+acceptable_versions:
+  applications:
+    docker_desktop:
+      min_version: "4.77.0"
+    # choco drops the leading zero: 7-Zip 26.02 is 26.2.0
+    sevenzip_install:
+      min_version: "26.2.0"
+    git:
+      min_version: "2.55.0.3"
+    greenshot:
+      min_version: "1.3.315"
+    javaruntime:
+      min_version: "8.0.4910.10"
+    microsoft_teams_new_bootstrapper:
+      min_version: "1.0.2508703"
+    pycharm:
+      min_version: "2026.2.2"
+    putty_install:
+      min_version: "0.85.0"
+    # Keep at feed latest so fresh installs and upgrades end on one version
+    vim:
+      min_version: "9.2.1061"
+    vscode_install:
+      min_version: "1.136.2"
+    winscp_install:
+      min_version: "6.5.5"
+    # Community `nxlog` package, not the abandoned `nxlog-ce`
+    nxlog:
+      min_version: "3.2.2329"
+    # Bump together with its chocoBuild internalize-spec entry
+    azure_cli:
+      min_version: "2.88.0"
+  runtimes:
+    python:
+      package_name: "python313"
+      min_version: "3.13.14"
+      exclusive: false
+      min_supported_track: "3.12"
+      floor_required: true
+      channels:
+        "3.12":
+          package_name: "python312"
+          min_version: "3.12.10"
+        "3.13":
+          package_name: "python313"
+          min_version: "3.13.14"
+        "3.14":
+          package_name: "python314"
+          min_version: "3.14.6"
+    dotnet_runtime:
+      family: "aspnetruntime"
+      track: "10.0"
+      channels:
+        "8.0":
+          min_version: "8.0.31"
+        "9.0":
+          min_version: "9.0.20"
+        "10.0":
+          min_version: "10.0.12"
+      exclusive: false
+      # Empty on purpose: EOL .NET tracks are not auto-retired
+      min_supported_track: ""
+      floor_required: false
+    powershell_core:
+      package_name: "powershell-core"
+      min_version: "7.6.6"
+      floor_required: true
+    # netfx-4.8.1: dotnetfx stops at 4.8. No uninstall; reboot after upgrade.
+    dotnet_framework:
+      package_name: "netfx-4.8.1"
+      min_version: "4.8.1.20250219"
+      min_release_dword: 533320
+
+# Candidates under test. Inert unless passed with -e against a TEST inventory.
+choco_test_pins:
+  javaruntime:
+    candidate_version: "8.0.431"
+    rollback_version: "8.0.4910.10"
+    current_floor: "8.0.4910.10"
+    staged_date: "2026-08-26"
+    status: "testing"
+    test_inventory: "inventory/TEST/inv-TEST-solo.yml"
+    notes: >-
+      Example test-pin workflow. Validate the candidate on an isolated lab
+      host before changing the approved floor; these values do not prove
+      package availability or compatibility.
+
+# Internal mirror. Empty url = public community feed only.
+trusted_choco_source:
+  name: ""
+  url: ""
+  priority: 1
+
+# Route each package id straight to the internal or public source
+choco_explicit_source_routing: true
+choco_auto_discover_internalized_apps: true
+choco_public_source_name: "chocolatey"
+chocoInternalRepo: []
+
+choco_disable_public_source: false
+
+# Managed app catalog
+choco_managed_apps:
+  - key: docker-desktop
+    install_size: medium
+    aliases:
+      - dockerdesktop
+      - docker-desktop
+      - docker desktop
+    task_file: apps/docker-desktop.yml
+    detect_packages:
+      - docker-desktop
+    registry_patterns:
+      - '^Docker Desktop$'
+    pre_remove_script: |
+      # Docker Desktop has both services (machine-scope) and user-session
+      # tray + helper processes. Stop services first, then use taskkill /F /T
+      # so the process tree dies across all user sessions (Stop-Process from
+      # SYSTEM context can miss interactive RDP/console sessions).
+      $ErrorActionPreference = 'SilentlyContinue'
+      Get-Service -Name 'com.docker*','docker*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Status -eq 'Running' } |
+        ForEach-Object { Stop-Service -Name $_.Name -Force -ErrorAction SilentlyContinue }
+      $procNames = @('Docker Desktop','Docker','dockerd','com.docker.backend','com.docker.proxy','com.docker.service')
+      foreach ($n in $procNames) {
+        & taskkill.exe /F /T /IM "$n.exe" 2>$null | Out-Null
+        Get-Process -Name $n -ErrorAction SilentlyContinue |
+          Stop-Process -Force -ErrorAction SilentlyContinue
+      }
+      # Wait for handles to release before uninstall.
+      $deadline = (Get-Date).AddSeconds(10)
+      while ((Get-Date) -lt $deadline) {
+        $alive = $false
+        foreach ($n in $procNames) {
+          if (Get-Process -Name $n -ErrorAction SilentlyContinue) { $alive = $true; break }
+        }
+        if (-not $alive) { break }
+        Start-Sleep -Milliseconds 500
+      }
+      Start-Sleep -Seconds 2
+    # Opt-in per run: -e docker_desktop_force_replace_orphan=true
+    force_orphan_cleanup_script: |
+      $ErrorActionPreference = 'SilentlyContinue'
+      # Belt-and-suspenders: re-kill any surviving Docker processes.
+      $procNames = @('Docker Desktop','Docker','dockerd','com.docker.backend','com.docker.proxy','com.docker.service','com.docker.build')
+      foreach ($n in $procNames) {
+        & taskkill.exe /F /T /IM "$n.exe" 2>$null | Out-Null
+        Get-Process -Name $n -ErrorAction SilentlyContinue |
+          Stop-Process -Force -ErrorAction SilentlyContinue
+      }
+      Start-Sleep -Seconds 2
+      # Remove the canonical "Docker Desktop" uninstall registry entry
+      # under HKLM (both 64-bit and WOW6432Node). Only act on entries whose
+      # DisplayName matches "Docker Desktop" exactly and whose Publisher is
+      # NOT Chocolatey - we never remove choco-owned entries here.
+      $scanRoots = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+      )
+      foreach ($root in $scanRoots) {
+        Get-ChildItem $root -ErrorAction SilentlyContinue |
+          Where-Object {
+            $props = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
+            $props.DisplayName -match '^Docker Desktop$' -and
+            $props.Publisher -notmatch '(?i)chocolatey'
+          } |
+          ForEach-Object {
+            Remove-Item -Path $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Output "Removed orphan registry key: $($_.PSPath)"
+          }
+      }
+      # Drop the residual install dir so the Chocolatey install does not
+      # try to "repair" or stack on the half-removed copy. User data
+      # under %APPDATA%\Docker and %LOCALAPPDATA%\Docker is preserved.
+      $progDirs = @(
+        (Join-Path $env:ProgramFiles 'Docker\Docker'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Docker\Docker')
+      )
+      foreach ($d in $progDirs) {
+        if ($d -and (Test-Path $d)) {
+          Remove-Item -Path $d -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Output "Removed residual install directory: $d"
+        }
+      }
+      # Also drop Chocolatey's local lib metadata for docker-desktop so a
+      # subsequent `choco install` actually runs instead of being skipped
+      # as "already installed". Without this, a previous broken/phantom
+      # install leaves choco believing the package is present even after
+      # the vendor uninstall + registry stub removal - and the next align
+      # task no-ops, leaving the host with NO real Docker Desktop install
+      # despite choco reporting one. Caught while testing path B on
+      # test-host-01 (June 9 2026).
+      $chocoLibDirs = @(
+        'C:\ProgramData\chocolatey\lib\docker-desktop',
+        'C:\ProgramData\chocolatey\lib-bad\docker-desktop',
+        'C:\ProgramData\chocolatey\lib-bkp\docker-desktop'
+      )
+      foreach ($d in $chocoLibDirs) {
+        if (Test-Path $d) {
+          Remove-Item -Path $d -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Output "Removed stale Chocolatey lib metadata: $d"
+        }
+      }
+
+  - key: 7zip.install
+    install_size: small
+    aliases:
+      - 7zip
+      - 7-zip
+    task_file: apps/7zip.install.yml
+    detect_packages:
+      - 7zip
+      - 7zip.install
+    registry_patterns:
+      - 7-zip
+
+  - key: git
+    install_size: medium
+    aliases:
+      - git
+    task_file: apps/git.yml
+    detect_packages:
+      - git
+      - git.install
+    registry_patterns:
+      - '^git( version)?'
+
+  - key: greenshot
+    install_size: small
+    aliases:
+      - greenshot
+    task_file: apps/greenshot.yml
+    detect_packages:
+      - greenshot
+    registry_patterns:
+      - greenshot
+    pre_remove_script: |
+      # Greenshot is unusually fragile during uninstall because:
+      #   1. It runs in user sessions (system tray) so a process kill from
+      #      the WinRM SYSTEM context must reach all user sessions.
+      #   2. The Inno Setup uninstaller refuses to remove files still in
+      #      use, then queues them in PendingFileRenameOperations - which
+      #      poisons the next chocoDeploy run with "advisory mode" warnings.
+      #   3. Orphan unins*.exe from a previously interrupted attempt can
+      #      still hold the install directory.
+      # The script below kills all known process names across every session
+      # (taskkill /F /T walks the process tree), reaps stragglers, and waits
+      # for the OS to actually release handles before returning control to
+      # the uninstaller step.
+      $ErrorActionPreference = 'SilentlyContinue'
+      $names = @(
+        'Greenshot',
+        'GreenshotPlugin',
+        'GreenshotImageEditor',
+        'GreenshotImg',
+        'GreenshotOCR'
+      )
+      foreach ($n in $names) {
+        # taskkill /F /T kills the whole process tree across all sessions,
+        # which Stop-Process alone does not always achieve when a process
+        # is owned by a different interactive user.
+        & taskkill.exe /F /T /IM "$n.exe" 2>$null | Out-Null
+        Get-Process -Name $n -ErrorAction SilentlyContinue |
+          Stop-Process -Force -ErrorAction SilentlyContinue
+      }
+      # Clean up orphan Inno Setup uninstallers from a previous interrupted
+      # run. These often hold the Greenshot install directory open.
+      Get-WmiObject Win32_Process -Filter "Name='unins000.exe' OR Name='unins001.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.ExecutablePath -match '(?i)greenshot' } |
+        ForEach-Object { & taskkill.exe /F /T /PID $_.ProcessId 2>$null | Out-Null }
+      # Wait up to 30s for processes to actually exit and for the OS to
+      # release file handles. The Inno Setup uninstaller has been observed
+      # to queue PendingFileRenameOperations on handles released within
+      # the same second; the explicit grace below avoids that.
+      $deadline = (Get-Date).AddSeconds(30)
+      while ((Get-Date) -lt $deadline) {
+        $alive = $false
+        foreach ($n in $names) {
+          if (Get-Process -Name $n -ErrorAction SilentlyContinue) { $alive = $true; break }
+        }
+        if (-not $alive) { break }
+        Start-Sleep -Milliseconds 500
+      }
+      Start-Sleep -Seconds 3
+    # Opt-in per run: -e greenshot_force_replace_orphan=true
+    force_orphan_cleanup_script: |
+      $ErrorActionPreference = 'SilentlyContinue'
+      # Make sure no Greenshot process is still resurrecting itself.
+      'Greenshot','GreenshotPlugin','GreenshotImageEditor','GreenshotImg','GreenshotOCR' |
+        ForEach-Object { & taskkill.exe /F /T /IM "$_.exe" 2>$null | Out-Null }
+      Start-Sleep -Seconds 2
+      # Remove the orphan Inno Setup uninstall registry keys (both 64-bit
+      # and WOW6432Node) for Greenshot specifically. We match by the
+      # canonical AppId Greenshot_is1 to avoid collateral damage.
+      $paths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Greenshot_is1',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Greenshot_is1'
+      )
+      foreach ($p in $paths) {
+        if (Test-Path $p) {
+          $publisher = (Get-ItemProperty -Path $p -Name 'Publisher' -ErrorAction SilentlyContinue).Publisher
+          $displayName = (Get-ItemProperty -Path $p -Name 'DisplayName' -ErrorAction SilentlyContinue).DisplayName
+          if ($displayName -match '(?i)greenshot') {
+            Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Output "Removed orphan registry key: $p (DisplayName='$displayName', Publisher='$publisher')"
+          }
+        }
+      }
+      # Also catch any non-canonical AppId by scanning for Greenshot
+      # entries with publisher matching Greenshot (NOT chocolatey - we
+      # leave choco-owned entries alone).
+      $scanRoots = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+      )
+      foreach ($root in $scanRoots) {
+        Get-ChildItem $root -ErrorAction SilentlyContinue |
+          Where-Object {
+            $props = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
+            $props.DisplayName -match '(?i)greenshot' -and
+            $props.Publisher -notmatch '(?i)chocolatey'
+          } |
+          ForEach-Object {
+            Remove-Item -Path $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Output "Removed orphan registry key: $($_.PSPath)"
+          }
+      }
+      # Drop the residual install directory so Chocolatey's Inno Setup
+      # install does not try to "repair" an existing install. User config
+      # under %APPDATA%\Greenshot is intentionally preserved.
+      $progDirs = @(
+        (Join-Path $env:ProgramFiles 'Greenshot'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Greenshot')
+      )
+      foreach ($d in $progDirs) {
+        if ($d -and (Test-Path $d)) {
+          Remove-Item -Path $d -Recurse -Force -ErrorAction SilentlyContinue
+          if (-not (Test-Path $d)) {
+            Write-Output "Removed orphan install directory: $d"
+          }
+        }
+      }
+      Write-Output "OrphanCleanupDone"
+
+  - key: microsoft-teams-new-bootstrapper
+    install_size: medium
+
+    # Opt-in only: runs only when named in targetSoftware
+    requires_explicit_target: true
+    aliases:
+      - teams
+      - microsoft-teams
+      - microsoftteams
+      - teams-bootstrapper
+    task_file: apps/microsoft-teams-new-bootstrapper.yml
+    detect_packages:
+      - microsoft-teams-new-bootstrapper
+      - microsoft-teams
+      - microsoft-teams.install
+    registry_patterns:
+      - '^Microsoft Teams(?! Meeting Add-in)'
+      - '^Teams Machine-Wide Installer$'
+    pre_remove_script: |
+      # Teams runs in user sessions. Use taskkill /F /T to reach processes
+      # owned by interactive RDP/console users, which Stop-Process from
+      # SYSTEM context cannot reliably stop.
+      $ErrorActionPreference = 'SilentlyContinue'
+      $procNames = @('ms-teams','Teams','Update')
+      foreach ($n in $procNames) {
+        & taskkill.exe /F /T /IM "$n.exe" 2>$null | Out-Null
+        Get-Process -Name $n -ErrorAction SilentlyContinue |
+          Stop-Process -Force -ErrorAction SilentlyContinue
+      }
+      $deadline = (Get-Date).AddSeconds(10)
+      while ((Get-Date) -lt $deadline) {
+        $alive = $false
+        foreach ($n in @('ms-teams','Teams')) {
+          if (Get-Process -Name $n -ErrorAction SilentlyContinue) { $alive = $true; break }
+        }
+        if (-not $alive) { break }
+        Start-Sleep -Milliseconds 500
+      }
+      Start-Sleep -Seconds 2
+
+  - key: pycharm
+    install_size: large
+    aliases:
+      - pycharm
+      - pycharm-community
+      - pycharmcommunity
+      - pycharm-ce
+      - pycharm-community-edition
+      - pycharm-unified
+    task_file: apps/pycharm.yml
+    detect_packages:
+      - pycharm
+      - pycharm-community
+    registry_patterns:
+      - '^PyCharm( Community| Professional)?'
+    pre_remove_script: |
+      # PyCharm runs in user sessions. taskkill /F /T reaches the JetBrains
+      # launcher + JBR JVM in all sessions; Stop-Process from SYSTEM context
+      # can miss processes owned by interactive RDP/console users.
+      $ErrorActionPreference = 'SilentlyContinue'
+      & taskkill.exe /F /T /IM 'pycharm.exe'    2>$null | Out-Null
+      & taskkill.exe /F /T /IM 'pycharm64.exe'  2>$null | Out-Null
+      & taskkill.exe /F /T /IM 'fsnotifier.exe' 2>$null | Out-Null
+      Get-Process -Name 'pycharm*','fsnotifier*' -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+      # Wait for handles to release before invoking the JetBrains uninstaller.
+      $deadline = (Get-Date).AddSeconds(15)
+      while ((Get-Date) -lt $deadline) {
+        if (-not (Get-Process -Name 'pycharm*' -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Milliseconds 500
+      }
+      Start-Sleep -Seconds 2
+      $paths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+      )
+      foreach ($p in $paths) {
+        Get-ItemProperty $p -ErrorAction SilentlyContinue |
+          Where-Object { $_.DisplayName -match '^PyCharm' -and $_.Publisher -notmatch 'Chocolatey' } |
+          ForEach-Object {
+            $quiet = $_.QuietUninstallString
+            $uninstall = $_.UninstallString
+            if ($quiet) {
+              if ($quiet -match '^"([^"]+)"\s*(.*)$') {
+                $proc = Start-Process -FilePath $Matches[1] -ArgumentList $Matches[2] -PassThru -WindowStyle Hidden
+              } else {
+                $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList "/c $quiet" -PassThru -WindowStyle Hidden
+              }
+              if (-not $proc.WaitForExit(120000)) { $proc | Stop-Process -Force -ErrorAction SilentlyContinue }
+            } elseif ($uninstall -match 'Uninstall\.exe') {
+              if ($uninstall -match '^"([^"]+)"') {
+                $proc = Start-Process -FilePath $Matches[1] -ArgumentList '/S' -PassThru -WindowStyle Hidden
+              }
+              if (-not $proc.WaitForExit(120000)) { $proc | Stop-Process -Force -ErrorAction SilentlyContinue }
+            }
+          }
+      }
+      Start-Sleep -Seconds 3
+    # Opt-in per run: -e pycharm_force_replace_orphan=true
+    force_orphan_cleanup_script: |
+      $ErrorActionPreference = 'SilentlyContinue'
+      $patterns = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+      )
+      $installDirs = @()
+      foreach ($p in $patterns) {
+        Get-ItemProperty $p -ErrorAction SilentlyContinue |
+          Where-Object { $_.DisplayName -match '(?i)^PyCharm( Community| Professional)?' } |
+          ForEach-Object {
+            if ($_.InstallLocation) { $installDirs += $_.InstallLocation }
+            $key = $_.PSPath
+            Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction SilentlyContinue
+          }
+      }
+      $installDirs += @(
+        Get-ChildItem 'C:\Program Files\JetBrains','C:\Program Files (x86)\JetBrains' -Directory -ErrorAction SilentlyContinue |
+          Where-Object { $_.Name -match '(?i)^PyCharm' } |
+          Select-Object -ExpandProperty FullName
+      )
+      foreach ($dir in ($installDirs | Sort-Object -Unique)) {
+        if ($dir -match '(?i)^[A-Z]:\\Program Files( \(x86\))?\\JetBrains\\PyCharm') {
+          Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+      }
+      Start-Sleep -Seconds 2
+
+  - key: putty.install
+    install_size: small
+    aliases:
+      - putty
+    task_file: apps/putty.install.yml
+    detect_packages:
+      - putty
+      - putty.install
+      - putty.portable
+    registry_patterns:
+      - '^PuTTY(?:\s|$)'
+
+  - key: javaruntime
+    install_size: medium
+    aliases:
+      - jre
+      - oracle_jre
+    task_file: apps/javaruntime.yml
+    detect_packages:
+      - javaruntime
+    registry_patterns:
+      - '^Java \d+ Update'
+      - '^Java\(TM\) SE Runtime Environment'
+
+  - key: vim
+    install_size: small
+    aliases:
+      - vim
+    task_file: apps/vim.yml
+    detect_packages:
+      - vim
+      - vim-tux.install
+    registry_patterns:
+      - '^vim'
+      - gvim
+    pre_remove_script: |
+      # gvim is an interactive user-session process; vim may also be running
+      # in console sessions. taskkill /F /T reaches all sessions.
+      $ErrorActionPreference = 'SilentlyContinue'
+      foreach ($n in @('vim','gvim')) {
+        & taskkill.exe /F /T /IM "$n.exe" 2>$null | Out-Null
+        Get-Process -Name $n -ErrorAction SilentlyContinue |
+          Stop-Process -Force -ErrorAction SilentlyContinue
+      }
+      Start-Sleep -Seconds 2
+
+  - key: vscode.install
+    install_size: medium
+    aliases:
+      - vscode
+      - vscode.install
+      - visual-studio-code
+      - code
+    task_file: apps/vscode.install.yml
+    detect_packages:
+      - vscode
+      - vscode.install
+    registry_patterns:
+      - '^Microsoft Visual Studio Code'
+      - '^Visual Studio Code$'
+    pre_remove_script: |
+      # VSCode runs in user sessions and may have unsaved editor buffers.
+      # This script forcibly kills the process tree across all sessions
+      # (taskkill /F /T), which is consistent with the pre-existing
+      # Stop-Process -Force behavior but reaches RDP/console sessions that
+      # SYSTEM-context Stop-Process can miss. Only runs when VSCode is
+      # being CONVERTED from a vendor install to Chocolatey ownership,
+      # i.e. when the operator has explicitly targeted vscode and a vendor
+      # copy was detected. Routine in-channel upgrades (choco-managed
+      # already) use state:latest and do NOT invoke this script.
+      $ErrorActionPreference = 'SilentlyContinue'
+      $procNames = @('Code','Code - Insiders','CodeHelper','CodeSetup')
+      foreach ($n in $procNames) {
+        & taskkill.exe /F /T /IM "$n.exe" 2>$null | Out-Null
+        Get-Process -Name $n -ErrorAction SilentlyContinue |
+          Stop-Process -Force -ErrorAction SilentlyContinue
+      }
+      $deadline = (Get-Date).AddSeconds(10)
+      while ((Get-Date) -lt $deadline) {
+        if (-not (Get-Process -Name 'Code','Code - Insiders' -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Milliseconds 500
+      }
+      Start-Sleep -Seconds 2
+
+  - key: nxlog
+    install_size: small
+    aliases:
+      - nxlog
+    task_file: apps/nxlog.yml
+    detect_packages:
+      - nxlog
+    registry_patterns:
+      - '^nxlog'
+
+  - key: winscp.install
+    install_size: small
+    aliases:
+      - winscp
+    task_file: apps/winscp.install.yml
+    detect_packages:
+      - winscp
+      - winscp.install
+    registry_patterns:
+      - winscp
+    pre_remove_script: |
+      # WinSCP is Inno Setup, like Greenshot - the uninstaller can leave
+      # PendingFileRenameOperations or partial registry state if WinSCP
+      # is running in a user session. taskkill /F /T reaches all sessions.
+      $ErrorActionPreference = 'SilentlyContinue'
+      foreach ($n in @('WinSCP','WinSCP.com')) {
+        & taskkill.exe /F /T /IM "$n.exe" 2>$null | Out-Null
+        Get-Process -Name $n -ErrorAction SilentlyContinue |
+          Stop-Process -Force -ErrorAction SilentlyContinue
+      }
+      $deadline = (Get-Date).AddSeconds(10)
+      while ((Get-Date) -lt $deadline) {
+        if (-not (Get-Process -Name 'WinSCP' -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Milliseconds 500
+      }
+      Start-Sleep -Seconds 2
+    # Opt-in per run: -e winscp_install_force_replace_orphan=true
+    force_orphan_cleanup_script: |
+      $ErrorActionPreference = 'SilentlyContinue'
+      foreach ($n in @('WinSCP','WinSCP.com')) {
+        & taskkill.exe /F /T /IM "$n.exe" 2>$null | Out-Null
+      }
+      Start-Sleep -Seconds 2
+      # Canonical Inno Setup AppId for WinSCP is winscp3_is1. Remove only
+      # entries whose DisplayName matches WinSCP.
+      $paths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\winscp3_is1',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\winscp3_is1'
+      )
+      foreach ($p in $paths) {
+        if (Test-Path $p) {
+          $displayName = (Get-ItemProperty -Path $p -Name 'DisplayName' -ErrorAction SilentlyContinue).DisplayName
+          if ($displayName -match '(?i)winscp') {
+            Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Output "Removed orphan registry key: $p (DisplayName='$displayName')"
+          }
+        }
+      }
+      # Catch non-canonical AppIds by scanning for WinSCP entries not owned
+      # by Chocolatey.
+      $scanRoots = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+      )
+      foreach ($root in $scanRoots) {
+        Get-ChildItem $root -ErrorAction SilentlyContinue |
+          Where-Object {
+            $props = Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue
+            $props.DisplayName -match '(?i)winscp' -and
+            $props.Publisher -notmatch '(?i)chocolatey'
+          } |
+          ForEach-Object {
+            Remove-Item -Path $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Output "Removed orphan registry key: $($_.PSPath)"
+          }
+      }
+      # Drop residual install dir. User data (saved sessions in registry
+      # under HKCU:\Software\Martin Prikryl\WinSCP 2 and config under
+      # %APPDATA%\WinSCP) is intentionally preserved.
+      $progDirs = @(
+        (Join-Path $env:ProgramFiles 'WinSCP'),
+        (Join-Path ${env:ProgramFiles(x86)} 'WinSCP')
+      )
+      foreach ($d in $progDirs) {
+        if ($d -and (Test-Path $d)) {
+          Remove-Item -Path $d -Recurse -Force -ErrorAction SilentlyContinue
+          if (-not (Test-Path $d)) {
+            Write-Output "Removed orphan install directory: $d"
+          }
+        }
+      }
+      Write-Output "OrphanCleanupDone"
+
+  - key: azure-cli
+    install_size: medium
+    # Opt-in only: runs only when named in targetSoftware
+    requires_explicit_target: true
+    aliases:
+      - az
+      - azure-cli
+      - azurecli
+      - azcli
+      - azure cli
+    task_file: apps/azure-cli.yml
+    detect_packages:
+      - azure-cli
+    registry_patterns:
+      - '^Microsoft CLI 2\.0 for Azure'
+      - '^Microsoft Azure CLI'
+
+# Removal catalog
+choco_always_remove_catalog:
+  - key: notepadplusplus
+    install_size: small
+    aliases:
+      - notepad++
+      - notepadplusplus
+      - npp
+    detect_packages:
+      - notepadplusplus
+      - notepadplusplus.install
+      - notepadplusplus.commandline
+    registry_patterns:
+      - '^Notepad\+\+'
+
+  - key: realvnc
+    install_size: small
+    aliases:
+      - realvnc
+      - real vnc
+      - vnc
+      - vnc-viewer
+      - vnc viewer
+      - vnc-connect
+      - vnc connect
+    detect_packages:
+      - realvnc
+      - vnc-viewer
+      - vnc-connect
+    registry_patterns:
+      - '^RealVNC(?:\s|$)'
+      - '^VNC Viewer(?:\s|$)'
+      - '^VNC Server(?:\s|$)'

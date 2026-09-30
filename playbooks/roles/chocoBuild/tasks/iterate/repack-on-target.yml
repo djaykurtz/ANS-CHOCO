@@ -1,0 +1,90 @@
+---
+# tasks/iterate/repack-on-target.yml
+#
+# Repack the iterate workdir for a package+version back into a .nupkg,
+# atomically replacing the staged .nupkg under chocoBuild_iterate_stage_dir.
+#
+# Uses the repack_nupkg.ps1 helper which enforces the forward-slash
+# entry-name convention NuGet/OPC requires (PowerShell 5.1's
+# Compress-Archive emits backslashes and produces an unreadable .nupkg).
+#
+# Required vars:
+#   iter_package, iter_version - same as iterate_extract
+#
+# Optional vars:
+#   iter_keep_workdir   - if true, leave the workdir in place after
+#                         repack (default false; workdir wiped on next
+#                         iterate_extract anyway)
+
+- name: chocoBuild iterate_repack | Validate inputs
+  ansible.builtin.assert:
+    that:
+      - iter_package | default('') | length > 0
+      - iter_version | default('') | length > 0
+    fail_msg: >-
+      iterate_repack requires iter_package and iter_version
+
+- name: chocoBuild iterate_repack | Compute paths
+  ansible.builtin.set_fact:
+    _iter_workdir:   "{{ chocoBuild_iterate_workdir }}\\{{ iter_package }}\\{{ iter_version }}"
+    _iter_dest_nupkg: "{{ chocoBuild_iterate_stage_dir }}\\{{ iter_package }}.{{ iter_version }}.nupkg"
+
+- name: chocoBuild iterate_repack | Verify workdir exists
+  ansible.windows.win_stat:
+    path: "{{ _iter_workdir }}"
+  register: _iter_workdir_stat
+
+- name: chocoBuild iterate_repack | Fail if workdir missing
+  ansible.builtin.fail:
+    msg: >-
+      iterate_repack: workdir not found at {{ _iter_workdir }}.
+      Run iterate_extract first.
+  when: not (_iter_workdir_stat.stat.exists and _iter_workdir_stat.stat.isdir)
+
+- name: chocoBuild iterate_repack | Upload repack helper script
+  ansible.windows.win_copy:
+    src: "{{ role_path }}/files/repack_nupkg.ps1"
+    dest: "{{ chocoBuild_repack_helper }}"
+
+- name: chocoBuild iterate_repack | Backup current staged .nupkg (best effort)
+  ansible.windows.win_shell: |
+    $src = '{{ _iter_dest_nupkg }}'
+    $bak = "$src.bak"
+    if (Test-Path -LiteralPath $src) {
+      Copy-Item -LiteralPath $src -Destination $bak -Force
+      "BACKED_UP $bak"
+    } else {
+      'NO_PRIOR'
+    }
+  register: _iter_repack_backup
+  changed_when: _iter_repack_backup.stdout | trim | regex_search('^BACKED_UP')
+
+- name: chocoBuild iterate_repack | Run repack
+  ansible.windows.win_shell: >-
+    & "{{ chocoBuild_repack_helper }}"
+    -SourceDir "{{ _iter_workdir }}"
+    -DestNupkg "{{ _iter_dest_nupkg }}"
+  register: _iter_repack_result
+  changed_when: _iter_repack_result.stdout | regex_search('"Status":"Packed"')
+
+- name: chocoBuild iterate_repack | Parse repack result
+  ansible.builtin.set_fact:
+    _iter_repack_parsed: "{{ _iter_repack_result.stdout | trim | from_json }}"
+
+- name: chocoBuild iterate_repack | Show result
+  ansible.builtin.debug:
+    msg:
+      - "Source workdir : {{ _iter_repack_parsed.Source }}"
+      - "Output nupkg   : {{ _iter_repack_parsed.Dest }}"
+      - "Size (MB)      : {{ (_iter_repack_parsed.SizeBytes | int / 1048576) | round(2) }}"
+      - "Entry count    : {{ _iter_repack_parsed.EntryCount }}"
+      - "Backup of prior: {{ _iter_repack_backup.stdout | trim }}"
+
+- name: chocoBuild iterate_repack | Optionally remove workdir
+  ansible.windows.win_file:
+    path: "{{ _iter_workdir }}"
+    state: absent
+  when: iter_keep_workdir | default(false) | bool == false
+  # Default is to wipe; iterate_extract recreates next time anyway.
+  # Set -e iter_keep_workdir=true to retain (useful when you want to
+  # diff the workdir against a fresh extract).

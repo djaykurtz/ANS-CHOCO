@@ -1,0 +1,8 @@
+---
+- name: Apps | Align winscp.install
+  ansible.builtin.include_tasks: ops/install-one.yml
+  vars:
+    pkg:
+      name: winscp.install
+      version: "{{ choco_target_min_version_map[app_catalog_item.key] | default(acceptable_versions.applications.winscp_install.min_version) }}"
+      registry_patterns: "{{ app_catalog_item.registry_patterns | default(['winscp']) }}"

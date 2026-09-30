@@ -1,0 +1,11 @@
+---
+- name: Apply system configuration
+  hosts: all
+  become: yes
+  roles:
+    - r1-initPolicy
+    - r2-featureInstall
+    - r3-fileCopy
+    - r4_softInstall
+    - r5-configs
+    # Add more roles as needed

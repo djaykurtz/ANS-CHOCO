@@ -1,0 +1,227 @@
+---
+# tasks/source/community.yml
+#
+# Internalize packages from the Chocolatey community feed:
+#  1. Download missing .nupkg files into the mirror's per-package
+#     subdirectory layout (skip cached ones unless force=true).
+#  2. Upload internalize-package.ps1 helper to the mirror.
+#  3. For each downloaded .nupkg, bundle the vendor binaries into it
+#     so clients never need to reach vendor URLs at install time.
+#  4. Sentinel-gate so already-internalized versions are skipped on
+#     re-run.
+#
+# Inputs (read from playbook vars OR a vars_files spec):
+#   choco_internalize_packages  - list of { id, version }
+#   choco_internalize_dir       - mirror root (default C:\tools\chocoRepo)
+#   choco_internalize_feed      - community feed URL
+#   choco_internalize_force     - re-download AND re-internalize
+#   choco_internalize_skip_bundle - download only, no bundling
+#
+# Hosts: the mirror host (mirror-01). Caller's play should target
+# `basic_hosts` (or the mirror inventory's host group).
+#
+# This task was moved from the old playbooks/chocoInternalize.yml on June 9 2026
+# as part of the chocoBuild role split.
+
+- name: chocoBuild source_community | Ensure cache root exists
+  ansible.windows.win_file:
+    path: "{{ choco_internalize_dir }}"
+    state: directory
+
+- name: chocoBuild source_community | Download missing nupkgs (per-package subdir layout)
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    $ProgressPreference = 'SilentlyContinue'
+    $root  = '{{ choco_internalize_dir }}'
+    $feed  = '{{ choco_internalize_feed }}'
+    $force = [bool]::Parse('{{ choco_internalize_force | bool | string | lower }}')
+
+    $packages = @(
+    {% for pkg in choco_internalize_packages %}
+      [pscustomobject]@{ Id = '{{ pkg.id }}'; Version = '{{ pkg.version }}' }{{ ',' if not loop.last else '' }}
+    {% endfor %}
+    )
+
+    $report = @()
+    foreach ($p in $packages) {
+      $pkgDir = Join-Path $root $p.Id
+      New-Item -ItemType Directory -Force -Path $pkgDir | Out-Null
+      $fname = "$($p.Id).$($p.Version).nupkg"
+      $fpath = Join-Path $pkgDir $fname
+      $url   = "$feed/$($p.Id)/$($p.Version)"
+
+      if ((Test-Path $fpath) -and (-not $force)) {
+        $size = (Get-Item $fpath).Length
+        $report += [pscustomobject]@{
+          Id = $p.Id; Version = $p.Version; Status = 'Cached'; Size = $size; Error = ''
+        }
+        continue
+      }
+
+      try {
+        Invoke-WebRequest -Uri $url -OutFile $fpath -UseBasicParsing -TimeoutSec 600
+        $size = (Get-Item $fpath).Length
+        $status = if ($force -and (Test-Path $fpath)) { 'Refreshed' } else { 'Downloaded' }
+        $report += [pscustomobject]@{
+          Id = $p.Id; Version = $p.Version; Status = $status; Size = $size; Error = ''
+        }
+      } catch {
+        $msg = $_.Exception.Message
+        if (Test-Path $fpath) { Remove-Item $fpath -Force -ErrorAction SilentlyContinue }
+        $report += [pscustomobject]@{
+          Id = $p.Id; Version = $p.Version; Status = 'Failed'; Size = 0; Error = $msg
+        }
+      }
+    }
+
+    $report | ConvertTo-Json -Compress -Depth 3
+  register: choco_internalize_result
+  changed_when: false
+  failed_when: false
+
+- name: chocoBuild source_community | Parse download result
+  ansible.builtin.set_fact:
+    choco_internalize_report: >-
+      {{
+        (choco_internalize_result.stdout | default('[]') | trim | from_json)
+        if (choco_internalize_result.stdout | default('') | trim | length > 0)
+        else []
+      }}
+
+- name: chocoBuild source_community | Per-package download result
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.Status }}: {{ item.Id }} {{ item.Version }}
+      {% if item.Size > 0 %}({{ (item.Size | int / 1048576) | round(2) }} MB){% endif %}
+      {% if item.Error %}- {{ item.Error }}{% endif %}
+  loop: "{{ choco_internalize_report }}"
+  loop_control:
+    label: "{{ item.Id }}"
+
+- name: chocoBuild source_community | Download summary
+  ansible.builtin.debug:
+    msg:
+      - "Total:      {{ choco_internalize_report | length }}"
+      - "Downloaded: {{ choco_internalize_report | selectattr('Status', 'equalto', 'Downloaded') | list | length }}"
+      - "Refreshed:  {{ choco_internalize_report | selectattr('Status', 'equalto', 'Refreshed') | list | length }}"
+      - "Cached:     {{ choco_internalize_report | selectattr('Status', 'equalto', 'Cached') | list | length }}"
+      - "Failed:     {{ choco_internalize_report | selectattr('Status', 'equalto', 'Failed') | list | length }}"
+      - "Output dir: {{ choco_internalize_dir }}"
+
+- name: chocoBuild source_community | Fail if any download failed
+  ansible.builtin.fail:
+    msg: >-
+      source_community: {{ choco_internalize_report | selectattr('Status', 'equalto', 'Failed') | list | length }}
+      package(s) failed to download. See per-package result above.
+  when: (choco_internalize_report | selectattr('Status', 'equalto', 'Failed') | list | length) > 0
+
+# ------------------------------------------------------------------
+# Bundle stage: embed vendor binaries inside each .nupkg so clients
+# do not reach vendor URLs at install time. Skipped when
+# choco_internalize_skip_bundle is true.
+# ------------------------------------------------------------------
+
+- name: chocoBuild source_community | Upload internalize-package.ps1 helper
+  ansible.windows.win_copy:
+    src: "{{ role_path }}/files/internalize-package.ps1"
+    dest: C:/tools/chocoRepo/internalize-package.ps1
+  when: not (choco_internalize_skip_bundle | bool)
+
+- name: chocoBuild source_community | Bundle vendor binaries into each .nupkg
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    $ProgressPreference = 'SilentlyContinue'
+    $root  = '{{ choco_internalize_dir }}'
+    $force = [bool]::Parse('{{ choco_internalize_force | bool | string | lower }}')
+    $helper = Join-Path $root 'internalize-package.ps1'
+
+    $packages = @(
+    {% for pkg in choco_internalize_packages %}
+      [pscustomobject]@{ Id = '{{ pkg.id }}'; Version = '{{ pkg.version }}' }{{ ',' if not loop.last else '' }}
+    {% endfor %}
+    )
+
+    $report = @()
+    foreach ($p in $packages) {
+      $pkgDir = Join-Path $root $p.Id
+      $fname  = "$($p.Id).$($p.Version).nupkg"
+      $fpath  = Join-Path $pkgDir $fname
+      $sentinelDir = Join-Path $pkgDir '.internalized'
+      New-Item -ItemType Directory -Force -Path $sentinelDir | Out-Null
+      $marker = Join-Path $sentinelDir "$($p.Version).done"
+
+      if (-not (Test-Path $fpath)) {
+        $report += [pscustomobject]@{ Id=$p.Id; Version=$p.Version; Status='MissingInput'; UrlCount=0; Error='' }
+        continue
+      }
+      if ((Test-Path $marker) -and (-not $force)) {
+        $report += [pscustomobject]@{ Id=$p.Id; Version=$p.Version; Status='AlreadyInternalized'; UrlCount=0; Error='' }
+        continue
+      }
+
+      try {
+        $forceArg = @{}
+        if ($force) { $forceArg = @{ Force = $true } }
+        $r = & $helper -NupkgPath $fpath @forceArg
+        Set-Content -Path $marker -Value (Get-Date -Format o) -Force
+        $report += [pscustomobject]@{
+          Id = $p.Id; Version = $p.Version
+          Status = $r.Status
+          UrlCount = ($r.UrlCount | ForEach-Object { [int]$_ })
+          Error = ''
+        }
+      } catch {
+        $report += [pscustomobject]@{
+          Id = $p.Id; Version = $p.Version
+          Status = 'Failed'; UrlCount = 0
+          Error = $_.Exception.Message
+        }
+      }
+    }
+
+    $report | ConvertTo-Json -Compress -Depth 3
+  register: choco_internalize_bundle_result
+  changed_when: false
+  failed_when: false
+  when: not (choco_internalize_skip_bundle | bool)
+
+- name: chocoBuild source_community | Parse bundle result
+  ansible.builtin.set_fact:
+    choco_internalize_bundle_report: >-
+      {{
+        (choco_internalize_bundle_result.stdout | default('[]') | trim | from_json)
+        if (choco_internalize_bundle_result.stdout | default('') | trim | length > 0)
+        else []
+      }}
+  when: not (choco_internalize_skip_bundle | bool)
+
+- name: chocoBuild source_community | Per-package internalize result
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.Status }}: {{ item.Id }} {{ item.Version }}
+      {% if item.UrlCount %}({{ item.UrlCount }} URL(s)){% endif %}
+      {% if item.Error %}- {{ item.Error }}{% endif %}
+  loop: "{{ choco_internalize_bundle_report | default([]) }}"
+  loop_control:
+    label: "{{ item.Id }}"
+  when: not (choco_internalize_skip_bundle | bool)
+
+- name: chocoBuild source_community | Internalize summary
+  ansible.builtin.debug:
+    msg:
+      - "Total:                {{ choco_internalize_bundle_report | length }}"
+      - "Internalized:         {{ choco_internalize_bundle_report | selectattr('Status', 'equalto', 'Internalized') | list | length }}"
+      - "Already internalized: {{ choco_internalize_bundle_report | selectattr('Status', 'equalto', 'AlreadyInternalized') | list | length }}"
+      - "Already bundled:      {{ choco_internalize_bundle_report | selectattr('Status', 'equalto', 'AlreadyBundled') | list | length }}"
+      - "Meta packages:        {{ choco_internalize_bundle_report | selectattr('Status', 'equalto', 'Meta') | list | length }}"
+      - "Failed:               {{ choco_internalize_bundle_report | selectattr('Status', 'equalto', 'Failed') | list | length }}"
+  when: not (choco_internalize_skip_bundle | bool)
+
+- name: chocoBuild source_community | Fail if any bundle failed
+  ansible.builtin.fail:
+    msg: >-
+      source_community: {{ choco_internalize_bundle_report | selectattr('Status', 'equalto', 'Failed') | list | length }}
+      package(s) failed to internalize. See per-package result above.
+  when:
+    - not (choco_internalize_skip_bundle | bool)
+    - (choco_internalize_bundle_report | default([]) | selectattr('Status', 'equalto', 'Failed') | list | length) > 0

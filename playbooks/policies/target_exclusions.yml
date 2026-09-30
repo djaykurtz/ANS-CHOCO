@@ -1,0 +1,8 @@
+schema_version: 1
+policy_id: protected-ad-ous
+ad_export_mode: protected_only
+protected_ous:
+  - id: restricted-cloudsync
+    distinguished_name: OU=Restricted,OU=Services,OU=Lab,OU=CloudSync,OU=Managed,DC=corp,DC=example,DC=com
+  - id: restricted-localonly
+    distinguished_name: OU=Restricted,OU=Services,OU=Lab,OU=LocalOnly,OU=Managed,DC=corp,DC=example,DC=com

@@ -1,0 +1,36 @@
+---
+# main.yml - Connect to Azure as a managed identity, retrieve secret from Azure Key Vault, return value
+
+- name: Retrieve secret from Azure Key Vault using managed identity
+  ansible.builtin.shell: |
+    pwsh -NoProfile -NonInteractive -Command '$ErrorActionPreference = "Stop"
+      Import-Module Az.Accounts -Force -ErrorAction Stop
+      Import-Module Az.KeyVault -Force -ErrorAction Stop
+      Connect-AzAccount -Identity  -Subscription "{{ subscription_name }}" | Out-Null
+      $secret = Get-AzKeyVaultSecret -VaultName "{{ keyvault_name }}" -Name "{{ secret_name }}"
+      ConvertFrom-SecureString $secret.SecretValue -AsPlainText
+    '
+  args:
+    executable: /bin/bash
+  register: kvSecretResult
+  changed_when: false
+  delegate_to: localhost
+  run_once: true
+  no_log: true
+
+- name: Validate retrieved Key Vault secret
+  ansible.builtin.assert:
+    that:
+      - (kvSecretResult.stdout | trim | length) > 0
+    fail_msg: "Key Vault returned an empty secret."
+    quiet: true
+  run_once: true
+  no_log: true
+
+- name: Set secret fact
+  ansible.builtin.set_fact:
+    keyVaultSecretValue: "{{ kvSecretResult.stdout }}"
+  delegate_to: localhost
+  delegate_facts: true
+  run_once: true
+  no_log: true

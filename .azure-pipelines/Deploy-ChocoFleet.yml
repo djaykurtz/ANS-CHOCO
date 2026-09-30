@@ -1,0 +1,14 @@
+# Manual deployment sample; configure the service connection and Arc node first.
+trigger: none
+pr: none
+
+pool:
+  vmImage: windows-latest
+
+steps:
+  - task: AzurePowerShell@5
+    inputs:
+      azureSubscription: 'sc-arc-example'
+      scriptType: FilePath
+      scriptPath: '.azure-pipelines/Deploy-ChocoFleet.ps1'
+      azurePowerShellVersion: LatestVersion

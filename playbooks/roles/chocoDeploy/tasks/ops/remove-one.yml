@@ -1,0 +1,303 @@
+---
+# Remove a blacklisted package whether it came from Chocolatey or another installer.
+
+- name: remove-one | Normalize removal inputs
+  ansible.builtin.set_fact:
+    remove_name: "{{ remove_item.key }}"
+    remove_detect_packages: "{{ remove_item.detect_packages | default([remove_item.key]) }}"
+    remove_registry_patterns: "{{ remove_item.registry_patterns | default([]) }}"
+    remove_registry_regex: >-
+      {{ '(?i)' ~ ((remove_item.registry_patterns | default([])) | join('|')) if ((remove_item.registry_patterns | default([])) | length) > 0 else '' }}
+    remove_pre_script: "{{ remove_item.pre_remove_script | default('') | trim }}"
+  changed_when: false
+
+- name: remove-one | Run pre-removal script
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    {{ remove_pre_script }}
+    "PreRemoveDone"
+  when: remove_pre_script | length > 0
+  changed_when: false
+  failed_when: false
+
+- name: remove-one | Compute Chocolatey packages to remove
+  ansible.builtin.set_fact:
+    remove_choco_matches: "{{ remove_detect_packages | intersect(choco_installed_map.keys() | list) | list }}"
+  changed_when: false
+
+- name: remove-one | Remove Chocolatey packages
+  chocolatey.chocolatey.win_chocolatey:
+    name: "{{ choco_pkg }}"
+    state: absent
+  loop: "{{ remove_choco_matches | default([]) }}"
+  loop_control:
+    loop_var: choco_pkg
+    label: "{{ remove_name }} => {{ choco_pkg }}"
+  register: remove_choco_results
+  failed_when: false
+
+- name: remove-one | Record Chocolatey removal errors in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_errors: >-
+      {{
+        choco_deploy_report_errors + [
+          {
+            'software': remove_name,
+            'operation': ('remove_chocolatey:' ~ (choco_result.choco_pkg | default('unknown'))),
+            'message': (
+              (choco_result.msg | default('') | trim)
+              if (choco_result.msg | default('') | trim | length) > 0
+              else ((choco_result.stderr | default('') | trim) if (choco_result.stderr | default('') | trim | length) > 0 else 'Chocolatey removal failed')
+            )
+          }
+        ]
+      }}
+  loop: "{{ remove_choco_results.results | default([]) }}"
+  loop_control:
+    loop_var: choco_result
+    label: "{{ choco_result.choco_pkg | default('unknown') }}"
+  when: choco_result.failed | default(false)
+  changed_when: false
+
+- name: remove-one | Initialize vendor matches
+  ansible.builtin.set_fact:
+    remove_vendor_matches: []
+  changed_when: false
+
+- name: remove-one | Discover vendor installs
+  ansible.builtin.set_fact:
+    remove_vendor_matches: "{{ remove_vendor_matches + [prog_item] }}"
+  loop: "{{ system_installed_programs | default([]) }}"
+  loop_control:
+    loop_var: prog_item
+    label: "{{ prog_item.display_name | default('unknown-program') }}"
+  when:
+    - remove_registry_patterns | length > 0
+    - prog_item.display_name | default('') is search(remove_registry_regex)
+    - not ((prog_item.publisher | default('')) is search('(?i)chocolatey'))
+  changed_when: false
+
+- name: remove-one | Remove vendor installs
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $itemsJson = @'
+    {{ remove_vendor_matches | to_json }}
+    '@
+    $items = @()
+    if ($itemsJson.Trim()) {
+      $parsed = $itemsJson | ConvertFrom-Json
+      if ($parsed -is [System.Array]) {
+        $items = $parsed
+      } elseif ($null -ne $parsed) {
+        $items = @($parsed)
+      }
+    }
+
+    foreach ($i in $items) {
+      if ($i.quiet_uninstall) {
+        $qu = $i.quiet_uninstall
+        if ($qu -match 'unins\d+\.exe') {
+          $qu = $qu -replace '/SILENT','/VERYSILENT'
+          if ($qu -notmatch '/VERYSILENT') { $qu = $qu + ' /VERYSILENT' }
+          $qu = $qu + ' /SUPPRESSMSGBOXES /NORESTART'
+        }
+        if ($qu -match '^"([^"]+)"\s*(.*)$') {
+          $proc = Start-Process -FilePath $Matches[1] -ArgumentList $Matches[2] -PassThru -WindowStyle Hidden
+          if (-not $proc.WaitForExit(120000)) { $proc | Stop-Process -Force -ErrorAction SilentlyContinue }
+        } else {
+          $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList "/c $qu" -PassThru -WindowStyle Hidden
+          if (-not $proc.WaitForExit(120000)) { $proc | Stop-Process -Force -ErrorAction SilentlyContinue }
+        }
+        continue
+      }
+
+      if ($i.product_code -match '^\{?[0-9A-Fa-f\-]{36}\}?$') {
+        $code = $i.product_code
+        if ($code -notmatch '^\{') { $code = '{' + $code + '}' }
+        $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList "/x $code /qn /norestart" -PassThru -WindowStyle Hidden
+        if (-not $proc.WaitForExit(120000)) { $proc | Stop-Process -Force -ErrorAction SilentlyContinue }
+        continue
+      }
+
+      if ($i.uninstall_string) {
+        $us = $i.uninstall_string
+        if ($us -match 'unins\d+\.exe') {
+          $us = $us -replace '/SILENT','/VERYSILENT'
+          if ($us -notmatch '/VERYSILENT') { $us = $us + ' /VERYSILENT' }
+          $us = $us + ' /SUPPRESSMSGBOXES /NORESTART'
+        }
+        if ($us -match '^"([^"]+)"\s*(.*)$') {
+          $proc = Start-Process -FilePath $Matches[1] -ArgumentList $Matches[2] -PassThru -WindowStyle Hidden
+          if (-not $proc.WaitForExit(120000)) { $proc | Stop-Process -Force -ErrorAction SilentlyContinue }
+        } else {
+          $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList "/c $us" -PassThru -WindowStyle Hidden
+          if (-not $proc.WaitForExit(120000)) { $proc | Stop-Process -Force -ErrorAction SilentlyContinue }
+        }
+      }
+    }
+
+    "RemovedCandidates=$($items.Count)"
+  register: remove_vendor_result
+  when: remove_vendor_matches | length > 0
+  changed_when: true
+  failed_when: false
+
+- name: remove-one | Verify vendor removals via registry re-check
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $pattern = '{{ remove_registry_regex }}'
+    if (-not $pattern) { '[]'; return }
+    $still = @()
+    $paths = @(
+      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    foreach ($p in $paths) {
+      Get-ItemProperty $p |
+        Where-Object { $_.DisplayName -match $pattern -and $_.Publisher -notmatch 'Chocolatey' } |
+        ForEach-Object {
+          $still += [pscustomobject]@{
+            DisplayName = $_.DisplayName
+            DisplayVersion = $_.DisplayVersion
+          }
+        }
+    }
+    $still | ConvertTo-Json -Compress
+  register: remove_vendor_verify_raw
+  when:
+    - remove_vendor_result is defined
+    - remove_registry_regex | length > 0
+  changed_when: false
+  failed_when: false
+
+- name: remove-one | Initialize vendor still-present list
+  ansible.builtin.set_fact:
+    remove_vendor_still_present: []
+  changed_when: false
+
+- name: remove-one | Parse vendor removal verification
+  ansible.builtin.set_fact:
+    remove_vendor_still_present: "{{ remove_vendor_verify_raw.stdout | from_json }}"
+  when:
+    - remove_vendor_verify_raw is defined
+    - remove_vendor_verify_raw.stdout is defined
+    - (remove_vendor_verify_raw.stdout | default('') | trim | length) > 0
+    - (remove_vendor_verify_raw.stdout | default('') | trim) != '[]'
+  changed_when: false
+
+- name: remove-one | Normalize vendor verification to list
+  ansible.builtin.set_fact:
+    remove_vendor_still_present: >-
+      {{ (remove_vendor_still_present if (remove_vendor_still_present is iterable and remove_vendor_still_present is not string and remove_vendor_still_present is not mapping) else [remove_vendor_still_present]) | default([]) }}
+  when: remove_vendor_still_present is defined
+  changed_when: false
+
+- name: remove-one | Record vendor removal errors in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_errors: >-
+      {{
+        choco_deploy_report_errors + [
+          {
+            'software': remove_name,
+            'operation': 'remove_vendor',
+            'message': (
+              (remove_vendor_result.stderr | default('') | trim)
+              if (remove_vendor_result.stderr | default('') | trim | length) > 0
+              else ((remove_vendor_result.stdout | default('') | trim) if (remove_vendor_result.stdout | default('') | trim | length) > 0 else 'Vendor removal failed')
+            )
+          }
+        ]
+      }}
+  when:
+    - remove_vendor_result is defined
+    - (remove_vendor_result.rc | default(0) | int) != 0
+  changed_when: false
+
+- name: remove-one | Record vendor removal failures for items still present
+  ansible.builtin.set_fact:
+    choco_deploy_report_errors: >-
+      {{
+        choco_deploy_report_errors + [
+          {
+            'software': (still_item.DisplayName | default(remove_name)),
+            'operation': 'remove_vendor_verify',
+            'message': ('Vendor uninstall ran but ' ~ (still_item.DisplayName | default(remove_name)) ~ ' ' ~ (still_item.DisplayVersion | default('')) ~ ' is still detected in the registry')
+          }
+        ]
+      }}
+  loop: "{{ remove_vendor_still_present | default([]) }}"
+  loop_control:
+    loop_var: still_item
+    label: "{{ still_item.DisplayName | default(remove_name) }}"
+  when:
+    - remove_vendor_result is defined
+    - (remove_vendor_still_present | default([]) | length) > 0
+  changed_when: false
+
+- name: remove-one | Build list of vendor display names still present
+  ansible.builtin.set_fact:
+    _vendor_still_names: "{{ remove_vendor_still_present | default([]) | map(attribute='DisplayName') | list }}"
+  when: remove_vendor_result is defined
+  changed_when: false
+
+- name: remove-one | Record Chocolatey removals in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': 'Removed',
+            'software': choco_event.choco_pkg,
+            'previous_version': (choco_installed_map[choco_event.choco_pkg] | default('unknown')),
+            'new_version': '',
+            'source': 'chocolatey',
+            'notes': ('Always-remove policy ' ~ remove_name)
+          }
+        ]
+      }}
+  loop: "{{ remove_choco_results.results | default([]) }}"
+  loop_control:
+    loop_var: choco_event
+    label: "{{ choco_event.choco_pkg | default(remove_name) }}"
+  when: choco_event.changed | default(false)
+  changed_when: false
+
+- name: remove-one | Record verified vendor removals in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': 'Removed',
+            'software': (vendor_event.display_name | default(remove_name)),
+            'previous_version': (vendor_event.display_version | default('unknown')),
+            'new_version': '',
+            'source': 'vendor',
+            'notes': ('Always-remove policy ' ~ remove_name)
+          }
+        ]
+      }}
+  loop: "{{ remove_vendor_matches | default([]) }}"
+  loop_control:
+    loop_var: vendor_event
+    label: "{{ vendor_event.display_name | default(remove_name) }}"
+  when:
+    - remove_vendor_result is defined
+    - (vendor_event.display_name | default(remove_name)) not in (_vendor_still_names | default([]))
+  changed_when: false
+
+- name: remove-one | Flag removal occurred
+  ansible.builtin.set_fact:
+    choco_removal_occurred: true
+  when: (remove_choco_matches | length > 0) or (remove_vendor_matches | length > 0)
+  changed_when: false
+
+- name: remove-one | Summary
+  ansible.builtin.debug:
+    msg: >-
+      remove-one summary:
+      item={{ remove_name }},
+      choco_matches={{ remove_choco_matches | default([]) }},
+      vendor_matches={{ (remove_vendor_matches | default([])) | length }}
+  when: choco_deploy_console_verbose | default(false) | bool
+  changed_when: false

@@ -1,0 +1,409 @@
+---
+- name: report | Build report metadata
+  ansible.builtin.set_fact:
+    choco_deploy_report_timestamp_utc: "{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}"
+    choco_deploy_report_date_utc: "{{ now(utc=true, fmt='%Y%m%d') }}"
+    choco_deploy_report_local_json_path: "{{ choco_deploy_local_report_dir }}\\{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}_chocoDeploy.json"
+    choco_deploy_report_local_html_path: "{{ choco_deploy_local_report_dir }}\\{{ now(utc=true, fmt='%Y%m%d') }}_chocoDeploy.html"
+    choco_deploy_report_control_json_path: "{{ ((choco_deploy_report_dir ~ '/') if (choco_deploy_report_dir.startswith('/')) else (playbook_dir ~ '/' ~ choco_deploy_report_dir ~ '/')) ~ now(utc=true, fmt='%Y%m%dT%H%M%SZ') ~ '_' ~ inventory_hostname ~ '_chocoDeploy.json' }}"
+    choco_deploy_report_target_software_text: "{{ (choco_selected_apps | default([]) | map(attribute='key') | list | join(', ')) if ((choco_selected_apps | default([]) | length) > 0) else 'none' }}"
+    choco_deploy_report_detected_software_text: >-
+      {{
+        (
+          detected_managed_apps | map(attribute='key') | list | join(', ')
+        )
+        if (
+          (detected_managed_apps is defined)
+          and ((detected_managed_apps | length) > 0)
+        )
+        else (
+          'none'
+          if (detected_managed_apps is defined)
+          else 'not-evaluated'
+        )
+      }}
+    choco_deploy_report_processing_software_text: >-
+      {{
+        (
+          choco_selected_apps | default([]) | map(attribute='key') | list | join(', ')
+        )
+        if (deployment == 'choco_baseline')
+        else (
+          (
+            detected_managed_apps | map(attribute='key') | list | join(', ')
+          )
+          if (
+            (detected_managed_apps is defined)
+            and ((detected_managed_apps | length) > 0)
+          )
+          else (
+            'none'
+            if (detected_managed_apps is defined)
+            else 'not-evaluated'
+          )
+        )
+      }}
+    choco_deploy_report_pending_reboot_text: "{{ 'yes' if (init_reboot_status.PendingReboot | default(false) | bool) else 'no' }}"
+    choco_deploy_report_pending_reboot_reasons_text: "{{ (init_reboot_status.Reasons | default([]) | join(', ')) if ((init_reboot_status.Reasons | default([]) | length) > 0) else 'none' }}"
+    choco_deploy_report_remove_software_text: "{{ (choco_selected_remove_items | default([]) | map(attribute='key') | list | join(', ')) if ((choco_selected_remove_items | default([]) | length) > 0) else 'none' }}"
+    choco_deploy_report_target_runtimes_text: "{{ (choco_selected_runtime_ids | default([]) | join(', ')) if ((choco_selected_runtime_ids | default([]) | length) > 0) else 'none' }}"
+    choco_deploy_report_error_count: "{{ choco_deploy_report_errors | default([]) | length }}"
+    choco_deploy_report_error_log_path: "{{ choco_deploy_local_report_dir }}\\{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}_chocoDeploy_errors.txt"
+    choco_deploy_report_command_text: >-
+      ansible-playbook playbooks/chocoDeploy.yml
+      -i {{ ((ansible_inventory_sources | default([]) | first) if ((ansible_inventory_sources | default([]) | length) > 0) else '<inventory-file>') }}
+      -l {{ inventory_hostname }}
+      -e '{{
+        {
+          "deployment": deployment,
+          "targetSoftware": (choco_selected_apps | default([]) | map(attribute="key") | list),
+          "removeSoftware": (choco_selected_remove_items | default([]) | map(attribute="key") | list),
+          "targetRuntimes": (choco_selected_runtime_ids | default([]))
+        } | to_json
+      }}'
+  changed_when: false
+
+- name: report | Build per-run JSON data structure
+  ansible.builtin.set_fact:
+    choco_deploy_report_run_data: >-
+      {{
+        {
+          "report_time": choco_deploy_report_timestamp_utc,
+          "system": inventory_hostname,
+          "deployment": (deployment | default('')),
+          "inventory_source": ((ansible_inventory_sources | default([]) | first) if ((ansible_inventory_sources | default([]) | length) > 0) else ''),
+          "pending_reboot": (init_reboot_status.PendingReboot | default(false) | bool),
+          "pending_reboot_actionable": (init_reboot_status.Actionable | default(false) | bool),
+          "pending_reboot_reasons": (init_reboot_status.Reasons | default([])),
+          "summary": {
+            "converted": (choco_deploy_report_events | default([]) | selectattr('action', 'equalto', 'Converted') | list | length),
+            "installed": (choco_deploy_report_events | default([]) | selectattr('action', 'equalto', 'Installed') | list | length),
+            "upgraded": (choco_deploy_report_events | default([]) | selectattr('action', 'equalto', 'Upgraded') | list | length),
+            "compliant": (choco_deploy_report_events | default([]) | selectattr('action', 'equalto', 'NoChange') | list | length),
+            "removed": (choco_deploy_report_events | default([]) | selectattr('action', 'equalto', 'Removed') | list | length),
+            "errors": (choco_deploy_report_errors | default([]) | length)
+          },
+          "events": (choco_deploy_report_events | default([])),
+          "errors": (choco_deploy_report_errors | default([])),
+          "advisories": {
+            "python_hku": (choco_python_hku | default({'loaded_user_hives': 0, 'findings': []})),
+            "reboot": (choco_deploy_report_advisory_reboot | default([]))
+          },
+          "diagnostics": {
+            "target_software": choco_deploy_report_target_software_text,
+            "detected_software": choco_deploy_report_detected_software_text,
+            "processing_software": choco_deploy_report_processing_software_text,
+            "remove_software": choco_deploy_report_remove_software_text,
+            "target_runtimes": choco_deploy_report_target_runtimes_text,
+            "ansible_command": choco_deploy_report_command_text
+          }
+        }
+      }}
+  changed_when: false
+
+- name: report | Build human-readable change summary
+  ansible.builtin.set_fact:
+    choco_deploy_report_text: |-
+      ================================================================
+      REPORT_TIME: {{ choco_deploy_report_timestamp_utc }}
+      SYSTEM:      {{ inventory_hostname }}
+      DEPLOYMENT:  {{ deployment }}
+      ================================================================
+
+      #### chocoDeploy Software Summary ####
+      {% set converted_items = choco_deploy_report_events | selectattr('action', 'equalto', 'Converted') | list %}
+      {% set conversion_vendor_removals = choco_deploy_report_events | selectattr('action', 'equalto', 'Removed') | selectattr('notes', 'defined') | selectattr('notes', 'search', 'Converted to Chocolatey') | list %}
+      {% set policy_removals = choco_deploy_report_events | selectattr('action', 'equalto', 'Removed') | rejectattr('notes', 'search', 'Converted to Chocolatey') | list %}
+      {% set installed_items = choco_deploy_report_events | selectattr('action', 'equalto', 'Installed') | list %}
+      {% set upgraded_items = choco_deploy_report_events | selectattr('action', 'equalto', 'Upgraded') | list %}
+      {% set aligned_items = choco_deploy_report_events | selectattr('action', 'equalto', 'NoChange') | list %}
+
+      >> Converted (vendor -> Chocolatey):
+      {% for item in converted_items %}
+      {% set vendor_removed = conversion_vendor_removals | selectattr('notes', 'search', item.software) | list %}
+         {% if vendor_removed | length > 0 %}* {{ vendor_removed | map(attribute='software') | join(', ') }} removed  ->  {{ item.software }} {{ item.new_version | default('') }}{% else %}* {{ item.software }} {{ item.new_version | default('') }}{% endif %}
+
+      {% else %}
+         - none
+      {% endfor %}
+
+      >> Installed (net new):
+      {% for item in installed_items %}
+         + {{ item.software }} {{ item.new_version | default('') }}
+      {% else %}
+         - none
+      {% endfor %}
+
+      >> Upgraded (Chocolatey):
+      {% for item in upgraded_items %}
+         ^ {{ item.software }} {{ item.previous_version | default('?') }} -> {{ item.new_version | default('?') }}
+      {% else %}
+         - none
+      {% endfor %}
+
+      >> Detected Compliant:
+      {% for item in aligned_items %}
+         = {{ item.software }} {{ item.previous_version | default('') }}
+      {% else %}
+         - none
+      {% endfor %}
+
+      >> Removed (policy):
+      {% for item in policy_removals %}
+         x {{ item.software }}{% if item.previous_version | default('') | length > 0 %} {{ item.previous_version }}{% endif %}
+
+      {% else %}
+         - none
+      {% endfor %}
+
+      >> Errors:
+      {% if (choco_deploy_report_error_count | int) > 3 %}
+         ! {{ choco_deploy_report_error_count }} errors captured. See: {{ choco_deploy_report_error_log_path }}
+      {% else %}
+      {% for item in choco_deploy_report_errors | default([]) %}
+         ! {{ item.software }}: {{ item.message }}
+      {% else %}
+         - none
+      {% endfor %}
+      {% endif %}
+
+      ---------------------------------------------------------------
+      DIAGNOSTICS
+      ---------------------------------------------------------------
+      TARGET_SOFTWARE:        {{ choco_deploy_report_target_software_text }}
+      DETECTED_SOFTWARE:      {{ choco_deploy_report_detected_software_text }}
+      PROCESSING_SOFTWARE:    {{ choco_deploy_report_processing_software_text }}
+      PENDING_REBOOT:         {{ choco_deploy_report_pending_reboot_text }}{% if init_reboot_status.PendingReboot | default(false) | bool %} ({{ choco_deploy_report_pending_reboot_reasons_text }}){% endif %}
+
+      REMOVE_SOFTWARE:        {{ choco_deploy_report_remove_software_text }}
+      TARGET_RUNTIMES:        {{ choco_deploy_report_target_runtimes_text }}
+      ANSIBLE_COMMAND:
+      {{ choco_deploy_report_command_text }}
+  changed_when: false
+
+- name: report | Display compact host summary
+  ansible.builtin.debug:
+    msg: >-
+      chocoDeploy {{ 'report-only rebuild' if (deployment == 'report_only') else 'summary' }}:
+      host={{ inventory_hostname }};
+      deployment={{ deployment }};
+      pending_reboot={{ choco_deploy_report_pending_reboot_text }};
+      detected={{ (detected_managed_apps | default([]) | length) if (detected_managed_apps is defined) else 'not-evaluated' }};
+      processing={{ (choco_selected_apps | default([]) | length) if (deployment in ['choco_baseline', 'choco_selective']) else ((detected_managed_apps | default([]) | length) if (detected_managed_apps is defined) else 'not-evaluated') }};
+      changes={{ choco_deploy_report_events | default([]) | length }};
+      errors={{ choco_deploy_report_error_count }};
+      local_report={{ choco_deploy_report_local_html_path if (choco_deploy_local_report_enabled | bool) else 'disabled' }};
+      control_report={{ choco_deploy_report_control_json_path if (choco_deploy_report_enabled | bool) else 'disabled' }}
+  when: choco_deploy_console_summary_enabled | default(true) | bool
+  changed_when: false
+
+- name: report | Display full host summary
+  ansible.builtin.debug:
+    msg: "{{ choco_deploy_report_text }}"
+  when: choco_deploy_console_show_full_report | default(false) | bool
+  changed_when: false
+
+- name: report | Ensure local report directory exists on target host
+  ansible.windows.win_file:
+    path: "{{ choco_deploy_local_report_dir }}"
+    state: directory
+  when: choco_deploy_local_report_enabled | bool
+
+- name: report | Grant authenticated users modify access on local report directory
+  ansible.windows.win_acl:
+    path: "{{ choco_deploy_local_report_dir }}"
+    user: "{{ choco_deploy_local_report_acl_principal }}"
+    rights: "{{ choco_deploy_local_report_acl_rights }}"
+    type: allow
+    state: present
+    inherit: ContainerInherit,ObjectInherit
+    propagation: None
+  when:
+    - choco_deploy_local_report_enabled | bool
+    - choco_deploy_local_report_acl_enabled | default(true) | bool
+
+- name: report | Write detailed error log on target host when error count is high
+  ansible.windows.win_copy:
+    dest: "{{ choco_deploy_report_error_log_path }}"
+    content: |-
+      REPORT_TIME:
+      {{ choco_deploy_report_timestamp_utc }}
+      SYSTEM:
+      {{ inventory_hostname }}
+      ERROR_COUNT:
+      {{ choco_deploy_report_error_count }}
+      DEPLOYMENT:
+      {{ deployment }}
+      TARGET_SOFTWARE:
+      {{ choco_deploy_report_target_software_text }}
+      DETECTED_EXISTING_SOFTWARE:
+      {{ choco_deploy_report_detected_software_text }}
+      PROCESSING_SOFTWARE:
+      {{ choco_deploy_report_processing_software_text }}
+      PENDING_REBOOT:
+      {{ choco_deploy_report_pending_reboot_text }}
+      PENDING_REBOOT_REASONS:
+      {{ choco_deploy_report_pending_reboot_reasons_text }}
+      REMOVE_SOFTWARE:
+      {{ choco_deploy_report_remove_software_text }}
+      TARGET_RUNTIMES:
+      {{ choco_deploy_report_target_runtimes_text }}
+      ANSIBLE_COMMAND:
+      {{ choco_deploy_report_command_text }}
+      ERRORS:
+      {% for item in choco_deploy_report_errors | default([]) %}
+      - software: {{ item.software }}
+        operation: {{ item.operation }}
+        message: {{ item.message | default('') | replace('\r', ' ') | replace('\n', ' ') }}
+      {% else %}
+      - none
+      {% endfor %}
+  when:
+    - choco_deploy_local_report_enabled | bool
+    - (choco_deploy_report_error_count | int) > 3
+    - deployment != 'report_only'
+
+- name: report | Grant authenticated users modify access on local error log
+  ansible.windows.win_acl:
+    path: "{{ choco_deploy_report_error_log_path }}"
+    user: "{{ choco_deploy_local_report_acl_principal }}"
+    rights: "{{ choco_deploy_local_report_acl_rights }}"
+    type: allow
+    state: present
+  when:
+    - choco_deploy_local_report_enabled | bool
+    - choco_deploy_local_report_acl_enabled | default(true) | bool
+    - (choco_deploy_report_error_count | int) > 3
+    - deployment != 'report_only'
+
+- name: report | Reset daily reports on target host
+  ansible.windows.win_shell: |
+    $dir = '{{ choco_deploy_local_report_dir }}'
+    $date = '{{ choco_deploy_report_date_utc }}'
+    Get-ChildItem -Path $dir -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -match "^${date}" -and $_.Name -match 'chocoDeploy' } |
+      Remove-Item -Force -ErrorAction SilentlyContinue
+  when:
+    - choco_deploy_local_report_enabled | bool
+    - choco_deploy_reset_daily | default(false) | bool
+  changed_when: false
+
+- name: report | Write per-run JSON report on target host
+  ansible.windows.win_copy:
+    dest: "{{ choco_deploy_report_local_json_path }}"
+    content: "{{ choco_deploy_report_run_data | to_nice_json }}"
+  when:
+    - choco_deploy_local_report_enabled | bool
+    - deployment != 'report_only'
+
+- name: report | Grant authenticated users modify access on local JSON report
+  ansible.windows.win_acl:
+    path: "{{ choco_deploy_report_local_json_path }}"
+    user: "{{ choco_deploy_local_report_acl_principal }}"
+    rights: "{{ choco_deploy_local_report_acl_rights }}"
+    type: allow
+    state: present
+  when:
+    - choco_deploy_local_report_enabled | bool
+    - choco_deploy_local_report_acl_enabled | default(true) | bool
+    - deployment != 'report_only'
+
+- name: report | Read existing daily JSON reports from target for consolidation
+  ansible.windows.win_shell: |
+    $dir = '{{ choco_deploy_local_report_dir }}'
+    $date = '{{ choco_deploy_report_date_utc }}'
+    $pattern = "^${date}T\d{6}Z_chocoDeploy\.json$"
+    $runs = @()
+    Get-ChildItem -Path $dir -Filter '*_chocoDeploy.json' -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -match $pattern } |
+      Sort-Object Name |
+      ForEach-Object {
+        $runs += (Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue)
+      }
+    '[' + ($runs -join ',') + ']'
+  register: choco_deploy_daily_json_raw
+  changed_when: false
+  when: choco_deploy_local_report_enabled | bool
+
+- name: report | Parse consolidated daily runs
+  ansible.builtin.set_fact:
+    choco_deploy_daily_runs: "{{ choco_deploy_daily_json_raw.stdout | from_json }}"
+  when: choco_deploy_local_report_enabled | bool
+  changed_when: false
+
+- name: report | Write consolidated daily HTML report on target host
+  ansible.windows.win_template:
+    src: report.html.j2
+    dest: "{{ choco_deploy_report_local_html_path }}"
+  when: choco_deploy_local_report_enabled | bool
+
+- name: report | Grant authenticated users modify access on local HTML report
+  ansible.windows.win_acl:
+    path: "{{ choco_deploy_report_local_html_path }}"
+    user: "{{ choco_deploy_local_report_acl_principal }}"
+    rights: "{{ choco_deploy_local_report_acl_rights }}"
+    type: allow
+    state: present
+  when:
+    - choco_deploy_local_report_enabled | bool
+    - choco_deploy_local_report_acl_enabled | default(true) | bool
+
+- name: report | Ensure report directory exists on control node
+  ansible.builtin.file:
+    path: "{{ choco_deploy_report_dir if (choco_deploy_report_dir.startswith('/')) else (playbook_dir ~ '/' ~ choco_deploy_report_dir) }}"
+    state: directory
+  delegate_to: localhost
+  when: choco_deploy_report_enabled | bool
+
+- name: report | Write per-run JSON report on control node
+  ansible.builtin.copy:
+    dest: "{{ choco_deploy_report_control_json_path }}"
+    content: "{{ choco_deploy_report_run_data | to_nice_json }}"
+  delegate_to: localhost
+  when:
+    - choco_deploy_report_enabled | bool
+    - deployment != 'report_only'
+
+- name: report | Compress old local reports on target host
+  ansible.windows.win_shell: |
+    $retainDays = {{ choco_deploy_local_report_retain_days | default(90) }}
+    $logDir = '{{ choco_deploy_local_report_dir }}'
+    $archiveDir = Join-Path $logDir 'archive'
+    if (-not (Test-Path $logDir)) { return }
+    $cutoff = (Get-Date).AddDays(-$retainDays)
+    $old = Get-ChildItem -Path $logDir -File | Where-Object {
+      $_.Name -match '^\d{8}T\d{6}Z_chocoDeploy' -and $_.LastWriteTime -lt $cutoff
+    }
+    $oldHtml = Get-ChildItem -Path $logDir -File | Where-Object {
+      $_.Name -match '^\d{8}_chocoDeploy\.html$' -and $_.LastWriteTime -lt $cutoff
+    }
+    $allOld = @($old) + @($oldHtml) | Where-Object { $_ -ne $null }
+    if ($allOld.Count -eq 0) { return }
+    if (-not (Test-Path $archiveDir)) { New-Item -ItemType Directory -Path $archiveDir -Force | Out-Null }
+    $zipName = (Get-Date -Format 'yyyyMMdd') + '_chocoDeploy_old_logs.zip'
+    $zipPath = Join-Path $archiveDir $zipName
+    $allOld | Compress-Archive -DestinationPath $zipPath -Update
+    $allOld | Remove-Item -Force -ErrorAction SilentlyContinue
+  when: choco_deploy_local_report_enabled | bool
+  changed_when: false
+  failed_when: false
+
+- name: report | Write pending-reboot inventory on control node
+  ansible.builtin.copy:
+    dest: "{{ choco_deploy_pending_reboot_inventory }}"
+    content: |-
+      ---
+      all:
+        children:
+          pending_reboot:
+            hosts:
+      {% for host in ansible_play_hosts %}
+      {% if hostvars[host].init_reboot_status.PendingReboot | default(false) | bool %}
+              {{ host }}:
+      {% endif %}
+      {% endfor %}
+  delegate_to: localhost
+  run_once: true
+  when:
+    - choco_deploy_report_enabled | bool
+    - deployment != 'report_only'

@@ -1,0 +1,361 @@
+---
+# infra/dotnetFrameworkAlign.yml
+# Align .NET Framework 4.x under Chocolatey ownership using the dotnetfx
+# meta-package. Runtime alignment is opt-in through targetRuntimes.
+#
+# Notes:
+#   - .NET Framework is shipped in-box with Windows and CANNOT be uninstalled,
+#     only upgraded in place. There is no vendor cleanup phase.
+#   - Detection uses the registry release DWORD:
+#       HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full\Release
+#     If the in-box release already meets the desired floor, the choco
+#     install is still permitted in baseline/conversion so that Chocolatey
+#     records ownership for future servicing.
+#   - choco_update only acts when Chocolatey already owns the package, to keep
+#     the "fast" mode minimally invasive.
+#   - choco_conversion always evaluates: every Windows host has .NET Framework
+#     by definition, so "vendor present" is always true.
+#   - Installs frequently require a reboot. The role's end-of-run reboot
+#     evaluation will surface that.
+
+- name: dotnetFxAlign | Set alignment variables
+  ansible.builtin.set_fact:
+    dnfx_pkg: >-
+      {{
+        (choco_target_runtime_map.dotnet_framework | default({})).package_name
+        | default(acceptable_versions.runtimes.dotnet_framework.package_name, true)
+      }}
+    dnfx_version: >-
+      {{
+        (choco_target_runtime_map.dotnet_framework | default({})).min_version
+        | default(acceptable_versions.runtimes.dotnet_framework.min_version, true)
+      }}
+    dnfx_min_release: >-
+      {{
+        (choco_target_runtime_map.dotnet_framework | default({})).min_release_dword
+        | default(acceptable_versions.runtimes.dotnet_framework.min_release_dword, true)
+      }}
+    # Honor either the framework-specific flag (dnfx_audit_only) or the
+    # umbrella .NET audit flag (dotnet_audit_only) so a single -e
+    # 'dotnet_audit_only=true' covers both modern .NET and .NET Framework
+    # without requiring two flags. Either being true means audit-only.
+    dnfx_audit_only: >-
+      {{
+        ((dnfx_audit_only | default(false)) | bool)
+        or ((dotnet_audit_only | default(false)) | bool)
+      }}
+    dnfx_source_name: >-
+      {{
+        trusted_choco_source.name
+        if (
+          (acceptable_versions.runtimes.dotnet_framework.package_name)
+          in (choco_internalized_package_ids | default(chocoInternalRepo | default([])))
+        )
+        else (
+          (choco_public_source_effective | default(choco_public_source_name | default('chocolatey')))
+          if (choco_explicit_source_routing | default(true) | bool)
+          else ''
+        )
+      }}
+  changed_when: false
+
+- name: dotnetFxAlign | Read installed .NET Framework release from registry
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $key = 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full'
+    $release = (Get-ItemProperty -Path $key -Name Release -ErrorAction SilentlyContinue).Release
+    $version = (Get-ItemProperty -Path $key -Name Version -ErrorAction SilentlyContinue).Version
+    if (-not $release) { $release = 0 }
+    if (-not $version) { $version = '' }
+    @{ release = [int]$release; version = $version } | ConvertTo-Json -Compress
+  register: dnfx_state_raw
+  changed_when: false
+
+- name: dotnetFxAlign | Parse installed state
+  ansible.builtin.set_fact:
+    dnfx_state: "{{ dnfx_state_raw.stdout | from_json }}"
+  changed_when: false
+
+- name: dotnetFxAlign | Read package presence from inventory map
+  ansible.builtin.set_fact:
+    dnfx_choco_present: "{{ choco_installed_map[dnfx_pkg] is defined }}"
+    dnfx_choco_version: "{{ choco_installed_map[dnfx_pkg] | default('') }}"
+  changed_when: false
+
+- name: dotnetFxAlign | Determine alignment status
+  ansible.builtin.set_fact:
+    dnfx_release_ok: "{{ (dnfx_state.release | int) >= (dnfx_min_release | int) }}"
+    dnfx_choco_ok: >-
+      {{
+        dnfx_choco_present
+        and (dnfx_choco_version is version(dnfx_version, '>='))
+      }}
+  changed_when: false
+
+- name: dotnetFxAlign | Determine runtime alignment scope
+  ansible.builtin.set_fact:
+    # Vendor (in-box) is always present for .NET Framework on any supported
+    # Windows host, so conversion always evaluates. Baseline always evaluates.
+    # Update only acts when Chocolatey already owns the package.
+    dnfx_should_align: >-
+      {{
+        (deployment == 'choco_baseline')
+        or ((deployment == 'choco_update') and dnfx_choco_present)
+        or (deployment == 'choco_conversion')
+      }}
+    # Short-circuit: in update/conversion, if the in-box release already
+    # meets the floor and Chocolatey does not own dotnetfx, there is no
+    # net change to make - just record NoChange and skip the choco install.
+    # Baseline still installs to record choco ownership.
+    dnfx_skip_install: >-
+      {{
+        (deployment != 'choco_baseline')
+        and dnfx_release_ok
+        and (not dnfx_choco_present)
+      }}
+  changed_when: false
+
+- name: dotnetFxAlign | Skip - runtime not in scope for this deployment
+  ansible.builtin.debug:
+    msg: >-
+      dotnetFxAlign: SKIP - deployment={{ deployment }} and Chocolatey does not
+      own dotnetfx; nothing to do in update mode.
+  when:
+    - not dnfx_should_align
+    - choco_deploy_console_verbose | default(false) | bool
+  changed_when: false
+
+- name: dotnetFxAlign | OK - already aligned
+  ansible.builtin.debug:
+    msg: >-
+      dotnetFxAlign: OK - release={{ dnfx_state.release }}
+      (>= {{ dnfx_min_release }}), choco={{ dnfx_choco_version }}
+      (>= {{ dnfx_version }})
+  when:
+    - dnfx_release_ok
+    - dnfx_choco_ok
+    - choco_deploy_console_verbose | default(false) | bool
+  changed_when: false
+
+- name: dotnetFxAlign | Record no-change audit event
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': 'NoChange',
+            'software': dnfx_pkg,
+            'previous_version': (dnfx_choco_version if dnfx_choco_present else (dnfx_state.version | string)),
+            'new_version': (dnfx_choco_version if dnfx_choco_present else (dnfx_state.version | string)),
+            'source': ('chocolatey' if dnfx_choco_present else 'vendor'),
+            'notes': (
+              'Already aligned: registry release ' ~ dnfx_state.release ~
+              ' >= ' ~ dnfx_min_release ~
+              (', choco owns ' ~ dnfx_choco_version if dnfx_choco_present else ', not yet choco-owned')
+            )
+          }
+        ]
+      }}
+  when:
+    - (dnfx_release_ok and dnfx_choco_ok) or dnfx_skip_install | bool
+  changed_when: false
+
+- name: dotnetFxAlign | Install/upgrade .NET Framework via Chocolatey
+  # See state-selection notes in pythonAlign.yml. Same pattern: state=present
+  # for fresh install, state=latest when choco already owns netfx-4.8.1.
+  # Note: even on "already at floor" hosts, baseline mode still installs to
+  # record choco ownership; the short-circuit above guards non-baseline modes.
+  chocolatey.chocolatey.win_chocolatey:
+    name: "{{ dnfx_pkg }}"
+    version: "{{ dnfx_version if (dnfx_version | length > 0 and not dnfx_choco_present) else omit }}"
+    source: "{{ dnfx_source_name if (dnfx_source_name | length > 0) else omit }}"
+    state: "{{ 'latest' if dnfx_choco_present else 'present' }}"
+    force: "{{ choco_force_install | default(false) | bool }}"
+    ignore_checksums: "{{ choco_ignore_checksums | default(true) | bool }}"
+    timeout: "{{ choco_deploy_install_timeout_large | default(2700) | int }}"
+  register: dnfx_install
+  timeout: "{{ choco_deploy_task_timeout_large | default(3000) | int }}"
+  when:
+    - dnfx_should_align
+    - not dnfx_audit_only | bool
+    - not (dnfx_release_ok and dnfx_choco_ok)
+    - not dnfx_skip_install | bool
+  failed_when: false
+
+- name: dotnetFxAlign | Re-read registry after install
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $key = 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full'
+    $release = (Get-ItemProperty -Path $key -Name Release -ErrorAction SilentlyContinue).Release
+    $version = (Get-ItemProperty -Path $key -Name Version -ErrorAction SilentlyContinue).Version
+    if (-not $release) { $release = 0 }
+    if (-not $version) { $version = '' }
+    @{ release = [int]$release; version = $version } | ConvertTo-Json -Compress
+  register: dnfx_post_raw
+  when:
+    - dnfx_should_align
+    - dnfx_install is defined
+    - dnfx_install is not skipped
+  changed_when: false
+  failed_when: false
+
+- name: dotnetFxAlign | Re-query Chocolatey for installed version
+  ansible.windows.win_shell: |
+    $line = choco list --local-only --limit-output --exact {{ dnfx_pkg }} 2>$null |
+            Where-Object { $_ -match '^{{ dnfx_pkg }}\|' } |
+            Select-Object -First 1
+    if ($line) { ($line -split '\|')[1].Trim() }
+  register: dnfx_verify
+  when:
+    - dnfx_should_align
+    - dnfx_install is defined
+    - dnfx_install is not skipped
+  changed_when: false
+  failed_when: false
+
+- name: dotnetFxAlign | Parse post-install registry state
+  ansible.builtin.set_fact:
+    dnfx_post_state: >-
+      {{
+        (dnfx_post_raw.stdout | default('') | trim | length > 0)
+        | ternary(dnfx_post_raw.stdout | from_json, dnfx_state)
+      }}
+  when:
+    - dnfx_should_align
+    - dnfx_install is defined
+    - dnfx_install is not skipped
+  changed_when: false
+
+- name: dotnetFxAlign | Parse post-install Chocolatey version
+  ansible.builtin.set_fact:
+    dnfx_post_choco_version: "{{ (dnfx_verify.stdout | default('')) | trim }}"
+  when:
+    - dnfx_should_align
+    - dnfx_install is defined
+    - dnfx_install is not skipped
+  changed_when: false
+
+- name: dotnetFxAlign | Compute final framework state outcome
+  ansible.builtin.set_fact:
+    dnfx_final_release_ok: "{{ (dnfx_post_state.release | default(dnfx_state.release) | int) >= (dnfx_min_release | int) }}"
+    dnfx_final_choco_ok: >-
+      {{
+        ((dnfx_post_choco_version | default('')) | length > 0)
+        and ((dnfx_post_choco_version | default('0.0.0.0')) is version(dnfx_version, '>='))
+      }}
+  when:
+    - dnfx_should_align
+    - dnfx_install is defined
+    - dnfx_install is not skipped
+  changed_when: false
+
+# Advisory mode for pending-reboot hosts.
+# .NET Framework 4.8.x in-place upgrades commonly require a reboot to advance
+# the registry release DWORD. When the host already had a pending reboot at
+# the start of the run (init_reboot_status.PendingReboot), a failed assertion
+# here is almost always "needs reboot to finalize" rather than a real install
+# failure. To avoid breaking out-of-band patch runs in environments where
+# reboots are deferred, we record the situation as an error event but do NOT
+# hard-fail the play. On hosts that had a clean reboot state at start, a
+# release-didn't-advance is still a hard fail (something genuinely went wrong).
+- name: dotnetFxAlign | Record advisory - install did not fully apply, pending reboot likely
+  ansible.builtin.set_fact:
+    choco_deploy_report_errors: >-
+      {{
+        choco_deploy_report_errors + [
+          {
+            'software': dnfx_pkg,
+            'operation': 'framework_install_incomplete',
+            'message': (
+              'Chocolatey install reported success but registry release ' ~
+              (dnfx_post_state.release | default(dnfx_state.release) | string) ~
+              ' is below required ' ~ (dnfx_min_release | string) ~
+              '. Reboot is almost certainly required to advance the in-place .NET Framework upgrade; init_reboot_status.PendingReboot was true at run start.'
+            )
+          }
+        ]
+      }}
+  when:
+    - dnfx_should_align
+    - dnfx_install is defined
+    - dnfx_install is not skipped
+    - not (dnfx_install.failed | default(false) | bool)
+    - not (dnfx_final_release_ok | bool)
+    - (init_reboot_status.PendingReboot | default(false) | bool)
+  changed_when: false
+
+- name: dotnetFxAlign | Assert final framework state
+  # Hard-fails when the install reported success but the actual outcome did
+  # not meet policy AND there was no pending reboot at start. If there was a
+  # pending reboot at start, we already recorded an advisory above and skip
+  # the hard fail so the play can continue (reboot will resolve it later).
+  ansible.builtin.assert:
+    that:
+      - dnfx_final_release_ok | bool
+      - dnfx_final_choco_ok | bool
+    fail_msg: >-
+      dotnetFxAlign: FAILED - expected registry release >= {{ dnfx_min_release }}
+      and choco {{ dnfx_pkg }} >= {{ dnfx_version }}; got release={{ dnfx_post_state.release | default(dnfx_state.release) }},
+      choco={{ dnfx_post_choco_version | default('(missing)') }}.
+      No pending reboot was detected at run start, so this is unlikely to be
+      a deferred-reboot scenario - investigate the host.
+    quiet: true
+  when:
+    - dnfx_should_align
+    - dnfx_install is defined
+    - dnfx_install is not skipped
+    - not (dnfx_install.failed | default(false) | bool)
+    - not (init_reboot_status.PendingReboot | default(false) | bool)
+
+- name: dotnetFxAlign | Record install/upgrade audit event
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': (
+              'Upgraded' if (dnfx_choco_present and dnfx_post_choco_version | length > 0)
+              else 'Installed'
+            ),
+            'software': dnfx_pkg,
+            'previous_version': (dnfx_choco_version if dnfx_choco_present else (dnfx_state.version | string)),
+            'new_version': (dnfx_post_choco_version | default(dnfx_version)),
+            'source': 'chocolatey',
+            'notes': (
+              'Registry release ' ~ (dnfx_state.release | string) ~
+              ' -> ' ~ ((dnfx_post_state.release | default(dnfx_state.release)) | string) ~
+              ' (min ' ~ (dnfx_min_release | string) ~ ')'
+            )
+          }
+        ]
+      }}
+  when:
+    - dnfx_should_align
+    - dnfx_install is defined
+    - dnfx_install is not skipped
+    - dnfx_install.failed | default(false) | bool == false
+  changed_when: false
+
+- name: dotnetFxAlign | Record install error if Chocolatey reported failure
+  ansible.builtin.set_fact:
+    choco_deploy_report_errors: >-
+      {{
+        choco_deploy_report_errors + [
+          {
+            'software': dnfx_pkg,
+            'operation': 'install',
+            'message': (
+              dnfx_install.msg
+              | default(dnfx_install.stderr)
+              | default(dnfx_install.stdout)
+              | default('Chocolatey reported failure installing ' ~ dnfx_pkg)
+            )
+          }
+        ]
+      }}
+  when:
+    - dnfx_should_align
+    - dnfx_install is defined
+    - dnfx_install is not skipped
+    - dnfx_install.failed | default(false) | bool
+  changed_when: false

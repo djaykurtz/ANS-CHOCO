@@ -1,0 +1,29 @@
+{
+  "example_data": "Synthetic fixture; no real target was contacted.",
+  "report_time": "20260101T020000Z",
+  "system": "demo-host-01.example.com",
+  "deployment": "choco_selective",
+  "inventory_source": "synthetic demo fixture",
+  "pending_reboot": false,
+  "pending_reboot_actionable": false,
+  "pending_reboot_reasons": [],
+  "summary": {
+    "converted": 0, "installed": 1, "upgraded": 0,
+    "compliant": 0, "removed": 0, "errors": 0
+  },
+  "events": [
+    {
+      "software": "7zip.install",
+      "action": "Installed",
+      "previous_version": "",
+      "new_version": "26.2.0",
+      "source": "synthetic",
+      "notes": "Simulated successful retry; demonstration only."
+    }
+  ],
+  "errors": [],
+  "advisories": {},
+  "diagnostics": {
+    "ansible_command": "Synthetic example: no playbook was executed."
+  }
+}

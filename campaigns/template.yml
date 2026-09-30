@@ -1,0 +1,103 @@
+---
+# Campaign manifest template.
+#
+# A campaign is an approved change window, not a package catalog. It may contain
+# multiple phases, waves, and playbook runs. Copy this file to a dated campaign
+# file under /opt/ansible/incoming/<campaign-id>/ before planning a
+# deployment. Keep every run explicit so the final report can reconstruct what happened.
+#
+# Do not put credentials in this file. Do not use targetSoftware: null or
+# removeSoftware: null in a campaign run. Explicit [] means "touch nothing" and
+# prevents an accidental default catalog operation.
+# Before validation/rendering, every inventory in this manifest must pass:
+#   python3.12 playbooks/tools/lint_target_scope.py --campaign <this-file> \
+#     --ad-export <protected-AD-object-export.json>
+
+schema_version: 1
+campaign_id: 'YYYYMMDD-purpose'
+purpose: 'Describe the overall change objective'
+change_ticket: ''
+operator: ''
+status: planned
+approval:
+  recorded: false
+  reference: ''
+window:
+  timezone: America/Los_Angeles
+  starts: ''
+  ends: ''
+reboot_policy: never
+
+phases:
+  - phase_id: '00-readiness'
+    purpose: 'Read-only readiness and connectivity checks'
+    order: 0
+    runs:
+      - run_id: '00-readiness-01'
+        playbook: playbooks/patchReady.yml
+        inventory: /opt/ansible/incoming/YYYYMMDD/inv-readiness.yml
+        limit: basic_hosts
+        action: audit
+        status: planned
+        reboot_policy: never
+        target_software: []
+        remove_software: []
+        target_runtimes: []
+
+  - phase_id: '10-canary'
+    purpose: 'Validate the exact change on the approved canary'
+    order: 10
+    runs:
+      - run_id: '10-canary-01'
+        playbook: playbooks/chocoDeploy.yml
+        inventory: inventory/TEST/inv-TEST-solo.yml
+        limit: basic_hosts
+        mode: choco_conversion
+        status: planned
+        reboot_policy: never
+        target_software: []
+        remove_software: []
+        target_runtimes: []
+
+  - phase_id: '20-wave-1'
+    purpose: 'First production cohort'
+    order: 20
+    runs:
+      - run_id: '20-wave-1-01'
+        playbook: playbooks/chocoDeploy.yml
+        inventory: /opt/ansible/incoming/YYYYMMDD/inv-wave-1.yml
+        limit: basic_hosts
+        mode: choco_update
+        status: planned
+        reboot_policy: never
+        target_software: []
+        remove_software: []
+        target_runtimes: []
+
+  - phase_id: '30-remove-temporary-software'
+    purpose: 'One-time cleanup of a package from a defined cohort'
+    order: 30
+    runs:
+      - run_id: '30-remove-temporary-software-01'
+        playbook: playbooks/chocoDeploy.yml
+        inventory: /opt/ansible/incoming/YYYYMMDD/inv-remove-temporary.yml
+        limit: basic_hosts
+        mode: choco_update
+        status: planned
+        reboot_policy: never
+        # Keep the package in the shared catalog. This run expresses temporary
+        # intent for this cohort only; it is not a package retirement.
+        target_software: []
+        remove_software: ['package-id']
+        target_runtimes: []
+
+  - phase_id: '90-final-report'
+    purpose: 'Summarize all completed runs and unresolved hosts'
+    order: 90
+    runs:
+      - run_id: '90-final-report-01'
+        action: fleet_summary
+        status: planned
+        status_command: >-
+          python3.12 playbooks/roles/chocoDeploy/files/fleet_summary.py
+          --last-hours 24 --short-names

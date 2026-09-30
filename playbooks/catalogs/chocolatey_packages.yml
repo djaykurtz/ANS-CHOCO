@@ -1,0 +1,400 @@
+---
+# Shared Chocolatey package catalog.
+#
+# This file is the common contract between chocoBuild and chocoDeploy.
+# It describes package identity, approved deployment policy, acquisition method,
+# source routing, and the versions staged on the mirror.
+#
+# It does not replace role-specific behavior. chocoDeploy still owns task_file,
+# detection, conversion, removal, and pre_remove_script. chocoBuild still owns
+# the internalization and wrapper execution details.
+#
+# Version meanings:
+#   approved_version     the deployment floor or exact framework version
+#   mirror_versions      exact versions staged or intended for the mirror
+#   policy               minimum means upgrades may land newer; exact means the
+#                        package policy expects this exact version
+#
+# Source meanings:
+#   community            Chocolatey Community package internalized into mirror
+#   wrapper              locally rebuilt package with an official vendor binary
+#   firstparty           locally authored package from a vendor source
+#   manual               no automated acquisition contract yet
+#
+# Date meanings on version_timeline entries:
+#   public_feed_created  Chocolatey feed publication timestamp, not necessarily
+#                        the upstream vendor release date
+#   public_feed_updated  Last Chocolatey feed metadata update observed
+#   candidate_staged     Date the candidate was added to this repository's build
+#                        spec for mirror ingestion
+#   mirror_ingested      Date the candidate package was successfully written to
+#                        the trusted internal mirror
+#   test_installed       Date the candidate was actually installed or upgraded
+#                        on the approved TEST host
+#   tested_on            Date the candidate passed a recorded TEST run
+#   test_host             Inventory or host used for the validation
+#   promoted_on          Date the candidate became the deployment floor; empty
+#                        means it is not production policy yet
+#   repo_first_seen      Historical package introduction date. Leave empty until
+#                        established from repository history.
+
+schema_version: 1
+catalog_id: chocolatey-packages
+last_reviewed: '2026-09-15'
+
+source_policy:
+  public_source_name: chocolatey
+  community_feed: 'https://community.chocolatey.org/api/v2/package'
+  internal_mirror_root: 'C:\\tools\\chocoRepo'
+  deployment_source: internal_mirror_when_configured_else_public
+  internal_source_configured_by: inventory_or_run_vars
+  clients_should_reach_vendor_urls_at_install: false
+
+packages:
+  docker-desktop:
+    kind: application
+    display_name: Docker Desktop
+    package_id: docker-desktop
+    aliases: [dockerdesktop, docker-desktop, docker desktop]
+    approved_version: '4.77.0'
+    version_policy: minimum
+    deployment:
+      enabled: true
+      explicit_target: false
+    acquisition:
+      method: wrapper
+      community_package_id: docker-desktop
+      internalize: true
+      mirror_versions: ['4.64.0', '4.75.0', '4.76.0']
+      wrapper:
+        base_version: '4.75.0'
+        new_version: '4.76.0'
+        installer_url: 'https://desktop.docker.com/win/main/amd64/228118/Docker%20Desktop%20Installer.exe'
+        checksums_url: 'https://desktop.docker.com/win/main/amd64/228118/checksums.txt'
+        checksums_match: 'Docker Desktop Installer.exe'
+        base_nupkg_sha256: '117aca2f068bddabc620f4badbb4cffb7eb25af6a1a4bdb8f3fbb3fee393723c'
+
+  7zip.install:
+    kind: application
+    display_name: 7-Zip
+    package_id: 7zip.install
+    aliases: [7zip, 7-zip]
+    approved_version: '26.2.0'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: 7zip.install, internalize: true, mirror_versions: ['26.2.0', '26.1.0']}
+
+  git:
+    kind: application
+    display_name: Git
+    package_id: git
+    aliases: [git]
+    approved_version: '2.55.0.3'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: git, internalize: true, mirror_versions: ['2.55.0.3', '2.55.0.2']}
+
+  greenshot:
+    kind: application
+    display_name: Greenshot
+    package_id: greenshot
+    aliases: [greenshot]
+    approved_version: '1.3.315'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: greenshot, internalize: true, mirror_versions: ['1.3.315', '1.3.312']}
+
+  microsoft-teams-new-bootstrapper:
+    kind: application
+    display_name: Microsoft Teams
+    package_id: microsoft-teams-new-bootstrapper
+    aliases: [teams, microsoft-teams, microsoftteams, teams-bootstrapper]
+    approved_version: '1.0.2508703'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: true}
+    acquisition: {method: community, community_package_id: microsoft-teams-new-bootstrapper, internalize: true, mirror_versions: ['1.0.2508703', '1.0.2414501']}
+
+  pycharm:
+    kind: application
+    display_name: PyCharm
+    package_id: pycharm
+    aliases: [pycharm, pycharm-community, pycharmcommunity, pycharm-ce, pycharm-community-edition, pycharm-unified]
+    approved_version: '2026.2.2'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: pycharm, internalize: true, mirror_versions: ['2026.2.2', '2026.2.1', '2026.1.4']}
+    version_timeline:
+      - version: '2026.2.2'
+        public_feed_created: '2026-09-07T20:16:40Z'
+        public_feed_updated: '2026-09-07T22:15:26Z'
+        candidate_staged: '2026-09-15'
+        mirror_ingested: '2026-09-15'
+        test_installed: '2026-09-15'
+        tested_on: '2026-09-15'
+        test_host: 'inventory/TEST/inv-TEST-duo.yml'
+        test_hosts: ['inventory/TEST/inv-TEST-solo.yml', 'inventory/TEST/inv-TEST-duo.yml']
+        promoted_on: '2026-09-15'
+        repo_first_seen: ''
+
+  putty.install:
+    kind: application
+    display_name: PuTTY
+    package_id: putty.install
+    aliases: [putty]
+    approved_version: '0.85.0'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: putty.install, internalize: true, mirror_versions: ['0.85.0', '0.84.0', '0.83.0']}
+    version_timeline:
+      - version: '0.85.0'
+        public_feed_created: '2026-08-16T18:16:14Z'
+        public_feed_updated: '2026-08-16T20:15:34Z'
+        candidate_staged: '2026-09-15'
+        mirror_ingested: '2026-09-15'
+        test_installed: '2026-09-15'
+        tested_on: '2026-09-15'
+        test_host: 'inventory/TEST/inv-TEST-duo.yml'
+        test_hosts: ['inventory/TEST/inv-TEST-solo.yml', 'inventory/TEST/inv-TEST-duo.yml']
+        promoted_on: '2026-09-15'
+        repo_first_seen: ''
+
+  javaruntime:
+    kind: application
+    display_name: Java Runtime
+    package_id: javaruntime
+    aliases: [jre, oracle_jre]
+    approved_version: '8.0.4910.10'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: javaruntime, internalize: true, mirror_versions: ['8.0.4910.10']}
+
+  vim:
+    kind: application
+    display_name: Vim
+    package_id: vim
+    aliases: [vim]
+    approved_version: '9.2.1061'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: vim, internalize: true, mirror_versions: ['9.2.1061', '9.2.1054', '9.2.810']}
+    version_timeline:
+      - version: '9.2.1061'
+        public_feed_created: '2026-09-10T00:20:50Z'
+        public_feed_updated: '2026-09-11T09:30:28Z'
+        candidate_staged: '2026-09-15'
+        mirror_ingested: '2026-09-15'
+        test_installed: '2026-09-15'
+        tested_on: '2026-09-15'
+        test_host: 'inventory/TEST/inv-TEST-solo.yml'
+        test_hosts: ['inventory/TEST/inv-TEST-solo.yml', 'inventory/TEST/inv-TEST-duo.yml']
+        promoted_on: '2026-09-15'
+        repo_first_seen: ''
+
+  vscode.install:
+    kind: application
+    display_name: Visual Studio Code
+    package_id: vscode.install
+    aliases: [vscode, vscode.install, visual-studio-code, code]
+    approved_version: '1.136.2'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: vscode.install, internalize: true, mirror_versions: ['1.136.2', '1.129.1', '1.129.0']}
+    version_timeline:
+      - version: '1.136.2'
+        public_feed_created: '2026-09-08T18:20:54Z'
+        public_feed_updated: '2026-09-09T01:15:24Z'
+        candidate_staged: '2026-09-15'
+        mirror_ingested: '2026-09-15'
+        test_installed: '2026-09-15'
+        tested_on: '2026-09-15'
+        test_host: 'inventory/TEST/inv-TEST-duo.yml'
+        test_hosts: ['inventory/TEST/inv-TEST-solo.yml', 'inventory/TEST/inv-TEST-duo.yml']
+        promoted_on: '2026-09-15'
+        repo_first_seen: ''
+
+  nxlog:
+    kind: application
+    display_name: NXLog Community Edition
+    package_id: nxlog
+    aliases: [nxlog]
+    approved_version: '3.2.2329'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: nxlog, internalize: true, mirror_versions: ['3.2.2329']}
+
+  winscp.install:
+    kind: application
+    display_name: WinSCP
+    package_id: winscp.install
+    aliases: [winscp]
+    approved_version: '6.5.5'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: winscp.install, internalize: true, mirror_versions: ['6.5.6', '6.5.5', '6.5.4']}
+
+  azure-cli:
+    kind: application
+    display_name: Azure CLI
+    package_id: azure-cli
+    aliases: [az, azure-cli, azurecli, azcli, azure cli]
+    approved_version: '2.88.0'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: true}
+    acquisition:
+      method: community
+      community_package_id: azure-cli
+      internalize: true
+      mirror_versions: ['2.88.0', '2.87.0']
+      vendor_source: 'https://azcliprod.blob.core.windows.net/msi/azure-cli-<version>.msi'
+
+  python-3.12:
+    kind: runtime
+    display_name: Python 3.12
+    package_id: python312
+    runtime_id: python
+    track: '3.12'
+    approved_version: '3.12.10'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: python312, internalize: true, mirror_versions: ['3.12.10', '3.12.9']}
+
+  python-3.13:
+    kind: runtime
+    display_name: Python 3.13
+    package_id: python313
+    runtime_id: python
+    track: '3.13'
+    approved_version: '3.13.14'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: python313, internalize: true, mirror_versions: ['3.13.14', '3.13.13']}
+
+  python-3.14:
+    kind: runtime
+    display_name: Python 3.14
+    package_id: python314
+    runtime_id: python
+    track: '3.14'
+    approved_version: '3.14.6'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: python314, internalize: true, mirror_versions: ['3.14.6', '3.14.5']}
+
+  dotnet-8.0-aspnetruntime:
+    kind: runtime
+    display_name: .NET 8 ASP.NET Runtime
+    package_id: dotnet-8.0-aspnetruntime
+    runtime_id: dotnet_runtime
+    track: '8.0'
+    approved_version: '8.0.31'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: dotnet-8.0-aspnetruntime, internalize: true, mirror_versions: ['8.0.31', '8.0.30', '8.0.29']}
+    version_timeline:
+      - version: '8.0.31'
+        public_feed_created: '2026-09-09T00:12:42Z'
+        public_feed_updated: '2026-09-09T08:45:30Z'
+        candidate_staged: '2026-09-15'
+        mirror_ingested: '2026-09-15'
+        test_installed: '2026-09-15'
+        tested_on: '2026-09-15'
+        test_host: 'inventory/TEST/inv-TEST-solo.yml'
+        test_hosts: ['inventory/TEST/inv-TEST-solo.yml', 'inventory/TEST/inv-TEST-duo.yml']
+        promoted_on: '2026-09-15'
+        repo_first_seen: ''
+
+  dotnet-9.0-aspnetruntime:
+    kind: runtime
+    display_name: .NET 9 ASP.NET Runtime
+    package_id: dotnet-9.0-aspnetruntime
+    runtime_id: dotnet_runtime
+    track: '9.0'
+    approved_version: '9.0.20'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: dotnet-9.0-aspnetruntime, internalize: true, mirror_versions: ['9.0.20', '9.0.19', '9.0.18']}
+    version_timeline:
+      - version: '9.0.20'
+        public_feed_created: '2026-09-09T00:13:21Z'
+        public_feed_updated: '2026-09-09T12:15:25Z'
+        candidate_staged: '2026-09-15'
+        mirror_ingested: '2026-09-15'
+        test_installed: '2026-09-15'
+        tested_on: '2026-09-15'
+        test_host: 'inventory/TEST/inv-TEST-solo.yml'
+        test_hosts: ['inventory/TEST/inv-TEST-solo.yml', 'inventory/TEST/inv-TEST-duo.yml']
+        promoted_on: '2026-09-15'
+        repo_first_seen: ''
+
+  dotnet-10.0-aspnetruntime:
+    kind: runtime
+    display_name: .NET 10 ASP.NET Runtime
+    package_id: dotnet-10.0-aspnetruntime
+    runtime_id: dotnet_runtime
+    track: '10.0'
+    approved_version: '10.0.12'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: dotnet-10.0-aspnetruntime, internalize: true, mirror_versions: ['10.0.12', '10.0.11', '10.0.10']}
+    version_timeline:
+      - version: '10.0.12'
+        public_feed_created: '2026-09-09T00:10:51Z'
+        public_feed_updated: '2026-09-10T01:15:28Z'
+        candidate_staged: '2026-09-15'
+        mirror_ingested: '2026-09-15'
+        test_installed: '2026-09-15'
+        tested_on: '2026-09-15'
+        test_host: 'inventory/TEST/inv-TEST-solo.yml'
+        test_hosts: ['inventory/TEST/inv-TEST-solo.yml', 'inventory/TEST/inv-TEST-duo.yml']
+        promoted_on: '2026-09-15'
+        repo_first_seen: ''
+
+  powershell-core:
+    kind: runtime
+    display_name: PowerShell Core
+    package_id: powershell-core
+    runtime_id: powershell_core
+    approved_version: '7.6.6'
+    version_policy: minimum
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: powershell-core, internalize: true, mirror_versions: ['7.6.6', '7.6.5', '7.6.4']}
+    version_timeline:
+      - version: '7.6.6'
+        public_feed_created: '2026-09-09T06:07:13Z'
+        public_feed_updated: '2026-09-09T20:00:23Z'
+        candidate_staged: '2026-09-15'
+        mirror_ingested: '2026-09-15'
+        test_installed: '2026-09-15'
+        tested_on: '2026-09-15'
+        test_host: 'inventory/TEST/inv-TEST-duo.yml'
+        test_hosts: ['inventory/TEST/inv-TEST-solo.yml', 'inventory/TEST/inv-TEST-duo.yml']
+        promoted_on: '2026-09-15'
+        repo_first_seen: ''
+
+  netfx-4.8.1:
+    kind: runtime
+    display_name: .NET Framework 4.8.1
+    package_id: netfx-4.8.1
+    runtime_id: dotnet_framework
+    approved_version: '4.8.1.20250219'
+    version_policy: exact
+    deployment: {enabled: true, explicit_target: false}
+    acquisition: {method: community, community_package_id: netfx-4.8.1, internalize: true, mirror_versions: ['4.8.1.20250219']}
+
+campaign_contract:
+  campaign_id: required
+  phases: ordered list
+  phase:
+    phase_id: required
+    purpose: required
+    runs: ordered list
+  run:
+    run_id: required
+    playbook: required
+    inventory: required
+    mode: optional
+    target_software: explicit list or null
+    remove_software: explicit list or null
+    target_runtimes: explicit list or null
+    reboot_policy: never|if_needed|always
+    status: planned|running|complete|blocked|cancelled

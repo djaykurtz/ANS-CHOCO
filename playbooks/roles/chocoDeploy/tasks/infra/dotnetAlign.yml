@@ -1,0 +1,475 @@
+---
+# infra/dotnetAlign.yml
+# Align a specific .NET runtime under Chocolatey.
+# Runtime alignment is opt-in through targetRuntimes.
+# In choco_conversion, only align when the requested track is already present.
+# In choco_update, only align when Chocolatey already owns the runtime.
+# In choco_baseline, install or align the targeted runtime.
+#
+# Multi-track: this task is invoked once per entry in
+# choco_dotnet_tracks_to_align (produced by infra/dotnetResolve.yml).
+#
+# Vendor cleanup is opt-in via dotnet_cleanup_vendor and only removes vendor
+# .NET Runtime / ASP.NET Core / Windows Desktop Runtime installs whose
+# major.minor matches the track being aligned. Wider sweeps (EOL or
+# out-of-policy tracks) are handled by infra/dotnetSweep.yml. SDKs, Targeting
+# Packs, Host components, and IIS Hosting Bundles are NEVER touched here.
+
+- name: dotnetAlign | Reset per-iteration state
+  ansible.builtin.set_fact:
+    dotnet_vendor_list: []
+    dotnet_vendor_present: false
+    dotnet_should_align: false
+    dotnet_ok: false
+    dotnet_install: {}
+    dotnet_vendor_remove: {}
+  changed_when: false
+
+- name: dotnetAlign | Set track variables
+  ansible.builtin.set_fact:
+    dotnet_family: >-
+      {{
+        (dotnet_track_item | default({})).family
+        | default((choco_target_runtime_map.dotnet_runtime | default({})).family, true)
+        | default(acceptable_versions.runtimes.dotnet_runtime.family, true)
+        | default((managed_runtimes | default({})).dotnet_runtime.family, true)
+      }}
+    dotnet_track: >-
+      {{
+        (dotnet_track_item | default({})).track
+        | default((choco_target_runtime_map.dotnet_runtime | default({})).track, true)
+        | default(acceptable_versions.runtimes.dotnet_runtime.track, true)
+        | default((managed_runtimes | default({})).dotnet_runtime.track, true)
+      }}
+    dotnet_channel_versions: "{{ acceptable_versions.runtimes.dotnet_runtime.channels | default({}) }}"
+    dotnet_cleanup_vendor: "{{ dotnet_cleanup_vendor | default(false) | bool }}"
+    dotnet_audit_only: "{{ dotnet_audit_only | default(false) | bool }}"
+  changed_when: false
+
+- name: dotnetAlign | Set version and package variables
+  ansible.builtin.set_fact:
+    dotnet_version: >-
+      {{
+        (dotnet_track_item | default({})).min_version
+        | default((choco_target_runtime_map.dotnet_runtime | default({})).min_version, true)
+        | default((dotnet_channel_versions[dotnet_track] | default({})).min_version, true)
+        | default(acceptable_versions.runtimes.dotnet_runtime.min_version, true)
+        | default((managed_runtimes | default({})).dotnet_runtime.min_version, true)
+      }}
+    dotnet_pkg: >-
+      {{
+        (dotnet_track_item | default({})).pkg
+        | default((choco_target_runtime_map.dotnet_runtime | default({})).package_name, true)
+        | default(acceptable_versions.runtimes.dotnet_runtime.package_name, true)
+        | default((managed_runtimes | default({})).dotnet_runtime.package_name, true)
+        | default('dotnet-' ~ dotnet_track ~ '-' ~ dotnet_family)
+      }}
+    dotnet_remove_conflicts: "{{ dotnet_remove_conflicts | default(false) | bool }}"
+    dotnet_remove_sdks: "{{ dotnet_remove_sdks | default(false) | bool }}"
+    dotnet_remove_same_major_others: "{{ dotnet_remove_same_major_others | default(false) | bool }}"
+    dotnet_conflict_pkgs:
+      - dotnet
+      - dotnet-runtime
+      - aspnetcore-runtimepackagestore
+  changed_when: false
+
+- name: dotnetAlign | Resolve source routing for package
+  ansible.builtin.set_fact:
+    dotnet_source_name: >-
+      {{
+        trusted_choco_source.name
+        if (dotnet_pkg in (choco_internalized_package_ids | default(chocoInternalRepo | default([]))))
+        else (
+          (choco_public_source_effective | default(choco_public_source_name | default('chocolatey')))
+          if (choco_explicit_source_routing | default(true) | bool)
+          else ''
+        )
+      }}
+  changed_when: false
+
+- name: dotnetAlign | Validate requested track and version policy
+  ansible.builtin.assert:
+    that:
+      - dotnet_track is match('^[0-9]+\.[0-9]+$')
+      - dotnet_version is match('^' ~ (dotnet_track | regex_escape) ~ '\.[0-9]+$')
+    fail_msg: >-
+      dotnetAlign: acceptable_versions.runtimes.dotnet_runtime is inconsistent.
+      track={{ dotnet_track }}, min_version={{ dotnet_version }}.
+        Example valid pairing: track=8.0 with min_version=8.0.25
+    quiet: true
+  changed_when: false
+
+- name: dotnetAlign | Read runtime presence from inventory map
+  ansible.builtin.set_fact:
+    dotnet_choco_present: "{{ choco_installed_map[dotnet_pkg] is defined }}"
+    dotnet_choco_version: "{{ choco_installed_map[dotnet_pkg] | default('') }}"
+  changed_when: false
+
+- name: dotnetAlign | Determine if Chocolatey already owns the desired version
+  ansible.builtin.set_fact:
+    dotnet_ok: "{{ dotnet_choco_present and (dotnet_choco_version is version(dotnet_version, '>=')) }}"
+  changed_when: false
+
+- name: dotnetAlign | Map runtime family to installed runtime name
+  ansible.builtin.set_fact:
+    dotnet_runtime_display_name: >-
+      {{
+        {
+          'aspnetruntime': 'Microsoft.AspNetCore.App',
+          'runtime': 'Microsoft.NETCore.App',
+          'windowsdesktop-runtime': 'Microsoft.WindowsDesktop.App'
+        }[dotnet_family]
+      }}
+  changed_when: false
+
+- name: dotnetAlign | Discover vendor .NET installs for this track
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $track = '{{ dotnet_track }}'
+    $hits = @()
+    $paths = @(
+      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    # Match vendor (non-Chocolatey) entries for Runtime / ASP.NET Core / Windows
+    # Desktop Runtime whose track (parsed from DisplayName) matches the target.
+    # Excluded by name: SDK, Targeting Pack, Host (incl. FX Resolver), and
+    # IIS Hosting Bundle - removing any of those can break unrelated workloads.
+    # DisplayVersion is NOT reliable for track parsing - Microsoft creates
+    # duplicate entries with MSI build versions (e.g. 64.0.4211) alongside
+    # semantic versions (e.g. 8.0.0.33031). Parse from DisplayName instead.
+    $accept = '^Microsoft\s+(\.NET(\s+Core)?(\s+Runtime)?|ASP\.NET\s+Core|Windows\s+Desktop\s+Runtime)\b'
+    $reject = '(SDK|Targeting Pack|Host\b|Host FX Resolver|Hosting Bundle)'
+    $trackInName = '(?:^|\s|-\s)' + [regex]::Escape($track) + '(?:\.\d+)?(?:\.\d+)?\s*(?:\(|$)'
+    foreach ($p in $paths) {
+      Get-ItemProperty $p |
+        Where-Object {
+          $_.DisplayName -and
+          ($_.DisplayName -match $accept) -and
+          ($_.DisplayName -notmatch $reject) -and
+          ($_.Publisher -notmatch 'Chocolatey') -and
+          ($_.DisplayName -match $trackInName)
+        } |
+        ForEach-Object {
+          $hits += [pscustomobject]@{
+            DisplayName          = $_.DisplayName
+            DisplayVersion       = $_.DisplayVersion
+            UninstallString      = $_.UninstallString
+            QuietUninstallString = $_.QuietUninstallString
+            ProductCode          = $_.PSChildName
+          }
+        }
+    }
+    $hits | ConvertTo-Json -Compress
+  register: dotnet_vendor_raw
+  changed_when: false
+  failed_when: false
+  when:
+    - (not dotnet_ok) or (dotnet_cleanup_vendor | bool)
+    - deployment == 'choco_conversion' or dotnet_cleanup_vendor | bool
+
+- name: dotnetAlign | Parse vendor inventory results
+  ansible.builtin.set_fact:
+    dotnet_vendor_list: >-
+      {%- set raw = dotnet_vendor_raw.stdout | default('') | trim -%}
+      {%- if raw | length == 0 -%}
+        []
+      {%- else -%}
+        {%- set parsed = raw | from_json -%}
+        {%- if parsed is mapping -%}
+          {{ [parsed] }}
+        {%- else -%}
+          {{ parsed }}
+        {%- endif -%}
+      {%- endif -%}
+  when:
+    - (not dotnet_ok) or (dotnet_cleanup_vendor | bool)
+    - deployment == 'choco_conversion' or dotnet_cleanup_vendor | bool
+  changed_when: false
+
+- name: dotnetAlign | Determine runtime alignment scope
+  # Alignment gates:
+  #   - baseline: always align all configured tracks
+  #   - update: only align tracks Chocolatey already owns (narrow mode)
+  #   - conversion: align tracks present in either choco OR vendor inventory
+  # Floor onboarding override:
+  #   When floor_required=true AND this iteration is processing the floor
+  #   track (min_supported_track), align even if not present anywhere. This
+  #   matches the docs' "mixed-fleet onboarding" behavior - the floor track
+  #   gets installed on hosts that have no .NET at all.
+  ansible.builtin.set_fact:
+    dotnet_vendor_present: "{{ (dotnet_vendor_list | default([]) | length) > 0 }}"
+    dotnet_should_align: >-
+      {{
+        (deployment == 'choco_baseline')
+        or ((deployment == 'choco_update') and dotnet_choco_present)
+        or ((deployment == 'choco_conversion') and (dotnet_choco_present or ((dotnet_vendor_list | default([]) | length) > 0)))
+        or (
+          (choco_dotnet_floor_required | default(false) | bool)
+          and (dotnet_track == (choco_dotnet_min_supported_track | default('')))
+        )
+      }}
+  changed_when: false
+
+- name: dotnetAlign | Skip runtime - not present for requested deployment
+  ansible.builtin.debug:
+    msg: >-
+      dotnetAlign: SKIP - runtime not present and deployment={{ deployment }} does not add new runtime installs.
+  when:
+    - not dotnet_should_align
+    - choco_deploy_console_verbose | default(false) | bool
+  changed_when: false
+
+- name: dotnetAlign | OK - target runtime already aligned
+  ansible.builtin.debug:
+    msg: >-
+      dotnetAlign: OK - {{ dotnet_pkg }} {{ dotnet_choco_version }}
+      satisfies track {{ dotnet_track }} (min={{ dotnet_version }})
+  when:
+    - dotnet_ok
+    - choco_deploy_console_verbose | default(false) | bool
+  changed_when: false
+
+- name: dotnetAlign | Record no-change audit event
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': 'NoChange',
+            'software': dotnet_pkg,
+            'previous_version': dotnet_choco_version,
+            'new_version': dotnet_choco_version,
+            'source': 'chocolatey',
+            'notes': 'Already aligned at or above minimum ' ~ dotnet_version ~ ' on track ' ~ dotnet_track
+          }
+        ]
+      }}
+  when: dotnet_ok
+  changed_when: false
+
+- name: dotnetAlign | Detect conflicting .NET packages
+  ansible.windows.win_command: >
+    choco list --local-only --limit-output
+  register: dotnet_choco_all
+  changed_when: false
+  failed_when: false
+  when:
+    - dotnet_should_align
+    - dotnet_remove_conflicts | bool
+
+- name: dotnetAlign | Compute conflicting .NET packages to remove
+  ansible.builtin.set_fact:
+    dotnet_conflicts_to_remove: >-
+      {{
+        dotnet_choco_all.stdout_lines | default([])
+        | map('trim')
+        | select('ne', '')
+        | map('regex_replace', '\|.*$', '')
+        | intersect(dotnet_conflict_pkgs)
+        | list
+      }}
+  when:
+    - dotnet_should_align
+    - dotnet_remove_conflicts | bool
+  changed_when: false
+
+- name: dotnetAlign | Remove conflicting .NET packages
+  chocolatey.chocolatey.win_chocolatey:
+    name: "{{ item }}"
+    state: absent
+  loop: "{{ dotnet_conflicts_to_remove | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  failed_when: false
+  when:
+    - dotnet_should_align
+    - dotnet_remove_conflicts | bool
+    - (dotnet_conflicts_to_remove | default([]) | length) > 0
+
+- name: dotnetAlign | Detect installed .NET SDKs
+  ansible.windows.win_command: >
+    choco list --local-only --limit-output dotnet-sdk
+  register: dotnet_sdk_query
+  changed_when: false
+  failed_when: false
+  when:
+    - dotnet_should_align
+    - dotnet_remove_sdks | bool
+
+- name: dotnetAlign | Remove .NET SDKs
+  chocolatey.chocolatey.win_chocolatey:
+    name: dotnet-sdk
+    state: absent
+  failed_when: false
+  when:
+    - dotnet_should_align
+    - dotnet_remove_sdks | bool
+    - (dotnet_sdk_query.stdout | default('') | trim | length) > 0
+
+- name: dotnetAlign | Remove vendor .NET installs for this track
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $itemsJson = @'
+    {{ dotnet_vendor_list | to_json }}
+    '@
+    $items = @()
+    if ($itemsJson.Trim()) {
+      $parsed = $itemsJson | ConvertFrom-Json
+      if ($parsed -is [System.Array]) {
+        $items = $parsed
+      } elseif ($null -ne $parsed) {
+        $items = @($parsed)
+      }
+    }
+
+    foreach ($i in $items) {
+      if ($i.ProductCode -match '^\{?[0-9A-Fa-f\-]{36}\}?$') {
+        $code = $i.ProductCode
+        if ($code -notmatch '^\{') { $code = '{' + $code + '}' }
+        Start-Process -FilePath msiexec.exe -ArgumentList @('/x', $code, '/qn', '/norestart') -Wait | Out-Null
+        continue
+      }
+      if ($i.QuietUninstallString) { cmd.exe /c $i.QuietUninstallString | Out-Null; continue }
+      if ($i.UninstallString)      { cmd.exe /c $i.UninstallString      | Out-Null; continue }
+    }
+
+    "RemovedCandidates=$($items.Count)"
+  register: dotnet_vendor_remove
+  changed_when: true
+  failed_when: false
+  when:
+    - dotnet_should_align or (dotnet_cleanup_vendor | bool)
+    - not dotnet_ok
+    - dotnet_cleanup_vendor | bool
+    - not dotnet_audit_only | bool
+    - (dotnet_vendor_list | default([]) | length) > 0
+
+- name: dotnetAlign | Install or pin target .NET runtime via Chocolatey
+  # See state-selection notes in pythonAlign.yml. Same pattern: state=present
+  # for fresh install, state=latest when choco already owns the track.
+  chocolatey.chocolatey.win_chocolatey:
+    name: "{{ dotnet_pkg }}"
+    version: "{{ dotnet_version if (dotnet_version | length > 0 and not dotnet_choco_present) else omit }}"
+    source: "{{ dotnet_source_name if (dotnet_source_name | length > 0) else omit }}"
+    state: "{{ 'latest' if dotnet_choco_present else 'present' }}"
+    force: "{{ choco_force_install | default(true) | bool }}"
+    ignore_checksums: "{{ choco_ignore_checksums | default(true) | bool }}"
+    timeout: "{{ choco_deploy_install_timeout_medium | default(900) | int }}"
+  register: dotnet_install
+  failed_when: false
+  timeout: "{{ choco_deploy_task_timeout_medium | default(1080) | int }}"
+  when:
+    - dotnet_should_align
+    - not dotnet_ok
+    - not dotnet_audit_only | bool
+
+- name: dotnetAlign | Re-query Chocolatey for verification
+  ansible.windows.win_command: >
+    choco list --local-only --limit-output {{ dotnet_pkg }}
+  register: dotnet_verify
+  changed_when: false
+  failed_when: false
+  when:
+    - dotnet_should_align
+    - not dotnet_ok
+
+- name: dotnetAlign | Assert final runtime state
+  ansible.builtin.assert:
+    that:
+      - (dotnet_verify.stdout | default('') | trim) is search('^' ~ dotnet_pkg ~ '\|')
+      - ((dotnet_verify.stdout | default('') | trim).split('|')[-1] | trim) is version(dotnet_version, '>=')
+      - ((dotnet_verify.stdout | default('') | trim).split('|')[-1] | trim) is match('^' ~ (dotnet_track | regex_escape) ~ '\.[0-9]+$')
+    fail_msg: >-
+      dotnetAlign: FAILED - expected {{ dotnet_pkg }} on track {{ dotnet_track }}
+      at or above {{ dotnet_version }}, got {{ dotnet_verify.stdout | default('') | trim }}
+    quiet: true
+  when:
+    - dotnet_should_align
+    - not dotnet_ok
+    - not dotnet_audit_only | bool
+    - not (dotnet_install.failed | default(false) | bool)
+
+- name: dotnetAlign | Record removed vendor .NET installs in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': 'Removed',
+            'software': (item.DisplayName | default('.NET vendor install')),
+            'previous_version': (item.DisplayVersion | default('')),
+            'new_version': '',
+            'source': 'vendor',
+            'notes': 'Dotnet runtime conversion cleanup (track ' ~ dotnet_track ~ ')'
+          }
+        ]
+      }}
+  loop: "{{ dotnet_vendor_list | default([]) }}"
+  loop_control:
+    label: "{{ item.DisplayName | default('.NET vendor install') }}"
+  when: dotnet_vendor_remove.changed | default(false) | bool
+  changed_when: false
+
+- name: dotnetAlign | Record .NET package change in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': ('Converted' if ((dotnet_vendor_present | default(false)) and (not dotnet_choco_present)) else ('Upgraded' if dotnet_choco_present else 'Installed')),
+            'software': dotnet_pkg,
+            'previous_version': (dotnet_choco_version if dotnet_choco_present else ''),
+            'new_version': ((dotnet_verify.stdout | default('') | trim).split('|')[-1] | trim),
+            'source': 'chocolatey',
+            'notes': (
+              ('Dotnet runtime converted to Chocolatey management; track ' ~ dotnet_track)
+              if ((dotnet_vendor_present | default(false)) and (not dotnet_choco_present))
+              else ('Dotnet runtime alignment track ' ~ dotnet_track)
+            )
+          }
+        ]
+      }}
+  when:
+    - dotnet_install.changed | default(false) | bool
+    - not (dotnet_install.failed | default(false) | bool)
+  changed_when: false
+
+- name: dotnetAlign | Record install error if Chocolatey reported failure
+  ansible.builtin.set_fact:
+    choco_deploy_report_errors: >-
+      {{
+        choco_deploy_report_errors + [
+          {
+            'software': dotnet_pkg,
+            'operation': 'install',
+            'message': (
+              dotnet_install.msg
+              | default(dotnet_install.stderr)
+              | default(dotnet_install.stdout)
+              | default('Chocolatey reported failure installing ' ~ dotnet_pkg)
+            )
+          }
+        ]
+      }}
+  when:
+    - dotnet_install.failed | default(false) | bool
+  changed_when: false
+
+- name: dotnetAlign | Summary
+  ansible.builtin.debug:
+    msg: >-
+      dotnetAlign summary:
+      should_align={{ dotnet_should_align }},
+      track={{ dotnet_track }},
+      pkg={{ dotnet_pkg }},
+      target_min={{ dotnet_version }},
+      ok_pre={{ dotnet_ok }},
+      vendor_present={{ dotnet_vendor_present | default(false) }},
+      vendor_candidates={{ (dotnet_vendor_list | default([])) | length }},
+      vendor_removed={{ dotnet_vendor_remove.changed | default(false) | bool }},
+      choco_changed={{ dotnet_install.changed | default(false) }},
+      conflicts_removed={{ (dotnet_conflicts_to_remove | default([])) | length }},
+      sdks_removed={{ dotnet_remove_sdks }}
+  when: choco_deploy_console_verbose | default(false) | bool
+  changed_when: false

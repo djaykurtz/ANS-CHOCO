@@ -1,0 +1,184 @@
+# tasks/main.yml -- winUpdate role
+# -------------------------------------------------------------------
+# Windows Update alignment engine
+# -------------------------------------------------------------------
+# Audit-only by default. The install and reboot phases are separately gated so
+# a bare run can never change a host.
+#
+# The role sets winupdate_result, a single mapping describing the outcome, so a
+# calling role can consume the result without reaching into internals. sysPatch
+# does exactly that.
+
+- name: winUpdate | Validate update mode
+  ansible.builtin.assert:
+    that:
+      - update in ['audit', 'download', 'install', 'install_reboot']
+    fail_msg: >-
+      Unsupported update '{{ update }}'.
+      Supported values: audit, download, install, install_reboot
+    quiet: true
+
+- name: winUpdate | Classify the run
+  ansible.builtin.set_fact:
+    _wu_state: >-
+      {{ {'audit': 'searched', 'download': 'downloaded',
+          'install': 'installed', 'install_reboot': 'installed'}[update] }}
+    _wu_installs: "{{ update in ['install', 'install_reboot'] }}"
+    _wu_may_reboot: "{{ update == 'install_reboot' }}"
+    _wu_run_ts: "{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}"
+    _wu_remote_dir_fs: >-
+      {{ winupdate_report_dir_remote | replace('\\', '/') }}
+    _wu_categories: >-
+      {{ winupdate_categories + (['Drivers'] if (winupdate_include_drivers | bool) else []) }}
+  changed_when: false
+
+- name: winUpdate | Ensure the report directory exists on the target
+  ansible.windows.win_file:
+    path: "{{ winupdate_report_dir_remote }}"
+    state: directory
+
+- name: winUpdate | Upload wu_state.ps1
+  ansible.windows.win_copy:
+    src: wu_state.ps1
+    dest: "{{ _wu_remote_dir_fs }}/wu_state.ps1"
+  changed_when: false
+
+- name: winUpdate | Collect Windows Update client state
+  ansible.windows.win_shell: >-
+    & "{{ _wu_remote_dir_fs }}/wu_state.ps1"
+    -HistoryCount {{ winupdate_history_count | int }}
+  register: _wu_state_raw
+  changed_when: false
+
+- name: winUpdate | Parse Windows Update client state
+  ansible.builtin.set_fact:
+    winupdate_state: "{{ _wu_state_raw.stdout | from_json }}"
+  failed_when: winupdate_state is not mapping
+
+- name: winUpdate | Show the update source
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}]
+      source={{ winupdate_state.update_source }}
+      {{ ('wsus=' ~ winupdate_state.wsus_server) if (winupdate_state.wsus_server | length) > 0 else '' }}
+      wuauserv={{ winupdate_state.services.wuauserv.status }}
+      disk_free={{ winupdate_state.disk_free_gb }}GB
+      uptime={{ winupdate_state.uptime_days }}d
+      pending_reboot={{ winupdate_state.reboot_pending }}
+
+- name: winUpdate | Require free space on C before installing
+  ansible.builtin.assert:
+    that:
+      - (winupdate_state.disk_free_gb | float) >= (winupdate_min_free_gb | float)
+    fail_msg: >-
+      {{ inventory_hostname }} has {{ winupdate_state.disk_free_gb }}GB free on C:,
+      below the {{ winupdate_min_free_gb }}GB required. Clear space first. A disk
+      that fills during Windows Update is the worst failure mode available here.
+    quiet: true
+  when:
+    - _wu_installs | bool
+    - (winupdate_min_free_gb | int) > 0
+
+- name: winUpdate | Confirm the reboot authorization before installing
+  ansible.builtin.assert:
+    that:
+      - winupdate_allow_reboot | bool
+      - inventory_hostname_short in (winupdate_reboot_allowed_hosts | default([]))
+    fail_msg: >-
+      update=install_reboot restarts {{ inventory_hostname }} and the reboot is
+      not authorized. Both gates must be satisfied. Pass
+      -e "winupdate_allow_reboot=true" and add '{{ inventory_hostname_short }}'
+      to winupdate_reboot_allowed_hosts in the inventory group_vars. Checked
+      before installing so a blocked reboot never strands a half-patched host.
+    quiet: true
+  when: _wu_may_reboot | bool
+
+# state=searched reports without downloading, state=downloaded stages the
+# payload without installing, state=installed applies it. Reboot is always
+# handled as a separate, gated step below rather than by win_updates itself.
+- name: winUpdate | Apply the Windows Update pass
+  ansible.windows.win_updates:
+    category_names: "{{ _wu_categories }}"
+    accept_list: "{{ winupdate_accept_list }}"
+    reject_list: "{{ winupdate_reject_list }}"
+    skip_optional: "{{ winupdate_skip_optional | bool }}"
+    state: "{{ _wu_state }}"
+    reboot: false
+  register: _wu_run
+  failed_when: false
+  vars:
+    ansible_command_timeout: "{{ winupdate_timeout }}"
+
+- name: winUpdate | Summarize the update pass
+  ansible.builtin.set_fact:
+    winupdate_result:
+      mode: "{{ update }}"
+      state: "{{ _wu_state }}"
+      source: "{{ winupdate_state.update_source }}"
+      wsus_server: "{{ winupdate_state.wsus_server }}"
+      found: "{{ _wu_run.found_update_count | default(0) }}"
+      installed: "{{ _wu_run.installed_update_count | default(0) }}"
+      downloaded: "{{ _wu_run.downloaded_update_count | default(0) }}"
+      failed: "{{ _wu_run.failed_update_count | default(0) }}"
+      filtered: "{{ _wu_run.filtered_updates | default({}) | length }}"
+      reboot_required: "{{ _wu_run.reboot_required | default(false) }}"
+      titles: >-
+        {{ (_wu_run.updates | default({}) | dict2items | map(attribute='value.title') | list)
+           if (_wu_run.updates is mapping) else [] }}
+      message: "{{ _wu_run.msg | default('') }}"
+      rebooted: false
+  changed_when: false
+
+- name: winUpdate | Show the update result
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}] windows update mode={{ update }}
+      found={{ winupdate_result.found }}
+      downloaded={{ winupdate_result.downloaded }}
+      installed={{ winupdate_result.installed }}
+      failed={{ winupdate_result.failed }}
+      reboot_required={{ winupdate_result.reboot_required }}
+
+- name: winUpdate | List the matching updates
+  ansible.builtin.debug:
+    msg: "{{ winupdate_result.titles }}"
+  when: (winupdate_result.titles | length) > 0
+
+- name: winUpdate | Report that nothing matched
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}] no updates matched the configured categories.
+      Source is {{ winupdate_result.source }}. On a WSUS-managed host this is a
+      normal result when nothing new has been approved for its target group.
+  when: (winupdate_result.found | int) == 0
+
+- name: winUpdate | Restart to complete the updates
+  ansible.windows.win_reboot:
+    reboot_timeout: "{{ winupdate_reboot_timeout | int }}"
+    post_reboot_delay: "{{ winupdate_post_reboot_settle_seconds | int }}"
+    msg: "winUpdate maintenance. Restarting to complete Windows updates."
+  register: _wu_reboot
+  when:
+    - _wu_may_reboot | bool
+    - winupdate_result.reboot_required | bool
+
+- name: winUpdate | Record the reboot in the result
+  ansible.builtin.set_fact:
+    winupdate_result: "{{ winupdate_result | combine({'rebooted': true}) }}"
+  when:
+    - _wu_may_reboot | bool
+    - winupdate_result.reboot_required | bool
+  changed_when: false
+
+- name: winUpdate | Advise that a reboot is outstanding
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}] a reboot is required to complete these updates
+      and update={{ update }} does not reboot. Schedule one.
+  when:
+    - winupdate_result.reboot_required | bool
+    - not (winupdate_result.rebooted | bool)
+
+- name: winUpdate | Write the report
+  ansible.builtin.include_tasks: ops/report.yml
+  when: winupdate_report_enabled | bool

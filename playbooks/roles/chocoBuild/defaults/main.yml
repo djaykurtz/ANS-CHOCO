@@ -1,0 +1,46 @@
+---
+# playbooks/roles/chocoBuild/defaults/main.yml
+#
+# Cross-cutting variables for the chocoBuild role. Per-package
+# specifications live in `chocoBuild_spec` (defined in a separate spec
+# file passed via vars_files, not here).
+
+# Mirror host paths (the canonical .nupkg repository)
+chocoBuild_mirror_root: 'C:\tools\chocoRepo'
+
+# Per-target host paths used by the iterate-on-target workflow.
+# `chocoBuild_iterate_workdir` is where extracted .nupkg contents live
+# during iteration (one subdir per package). `chocoBuild_iterate_stage_dir`
+# is where the .nupkg itself lives on the target host (the dir that
+# chocoDeploy will point at via --source for install/upgrade tests).
+chocoBuild_iterate_workdir: 'C:\tools\chocoRepo-iterate'
+chocoBuild_iterate_stage_dir: 'C:\tools\dockerfiles'
+
+# Repack behavior - NuGet/OPC requires forward-slash separators inside
+# the archive. PowerShell 5.1's Compress-Archive emits backslashes and
+# produces a zip NuGet rejects ("not a valid nupkg"). The helper script
+# `files/repack_nupkg.ps1` enforces forward slashes via
+# System.IO.Compression.ZipArchive.
+chocoBuild_repack_helper: 'C:/Windows/Temp/chocoBuild_repack_nupkg.ps1'
+
+# Code signing (optional - Phase 6+). Empty thumbprint = no signing.
+chocoBuild_signing_cert_thumbprint: ''
+
+# Default iterate-on-target parameters. Override per run:
+#   -e "iter_target=<host> iter_package=<id> iter_version=<ver>"
+iter_target: ''
+iter_package: ''
+iter_version: ''
+
+# Default install verification thresholds for the iterate-install task.
+# rc==0 success, 1641/3010 are "ok but reboot required".
+chocoBuild_install_ok_rcs: [0, 1641, 3010]
+
+# When the iterate-install task runs, it invokes chocoDeploy with this
+# deployment mode. choco_baseline installs the package regardless of
+# whether choco already knows about it - which is what iterate-install
+# needs (the test host may have any starting state, and the iterate
+# workflow's whole point is "install this thing whether it's there or
+# not"). choco_update would skip fresh installs (it only touches
+# packages choco already knows about) - wrong for iterate.
+chocoBuild_install_deployment_mode: 'choco_baseline'

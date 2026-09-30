@@ -1,0 +1,7 @@
+---
+# Phase 6 placeholder - author a package from scratch using a vendor URL +
+# SHA256 checksums + a templated chocolateyInstall.ps1. This is the
+# "1st-party trust model" path.
+- name: chocoBuild source_firstparty | NOT YET IMPLEMENTED (Phase 6)
+  ansible.builtin.fail:
+    msg: "source/firstparty.yml is a Phase 6 stub."

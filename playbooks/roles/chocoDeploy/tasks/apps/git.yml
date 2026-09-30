@@ -1,0 +1,8 @@
+---
+- name: Apps | Align git
+  ansible.builtin.include_tasks: ops/install-one.yml
+  vars:
+    pkg:
+      name: git
+      version: "{{ choco_target_min_version_map[app_catalog_item.key] | default(acceptable_versions.applications.git.min_version) }}"
+      registry_patterns: "{{ app_catalog_item.registry_patterns | default(['^git( version)?']) }}"

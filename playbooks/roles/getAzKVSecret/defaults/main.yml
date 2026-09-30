@@ -1,0 +1,5 @@
+---
+# These can all be overridden in the playbook or inventory. If no value is present, the default values will be used.
+subscription_name: "sub-example-dev"
+keyvault_name: "kv-example-arc"
+secret_name: ""

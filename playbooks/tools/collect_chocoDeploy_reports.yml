@@ -1,0 +1,32 @@
+---
+# Collect target-side chocoDeploy JSON reports after an interrupted run.
+# Read-only against targets. The fetched files are grouped by host so the
+# fleet_summary tool can recover every run that survived on disk.
+
+- name: Collect chocoDeploy target reports
+  hosts: basic_hosts
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  tasks:
+    - name: Find all target-side chocoDeploy JSON reports
+      ansible.windows.win_find:
+        paths: C:/tools/chocolog
+        patterns:
+          - '*_chocoDeploy.json'
+        file_type: file
+      register: choco_report_files
+      failed_when: false
+
+    - name: Fetch target-side chocoDeploy JSON reports
+      ansible.builtin.fetch:
+        src: "{{ item.path }}"
+        dest: "{{ choco_report_collect_dir | default(chocofleet_data_root ~ '/LOGS/chocoDeploy/recovered') }}/{{ inventory_hostname }}/"
+        flat: true
+      loop: "{{ choco_report_files.files | default([]) }}"
+      loop_control:
+        label: "{{ inventory_hostname }} {{ item.path | basename }}"
+      when:
+        - choco_report_files is defined
+        - not (choco_report_files.failed | default(false) | bool)
+      failed_when: false

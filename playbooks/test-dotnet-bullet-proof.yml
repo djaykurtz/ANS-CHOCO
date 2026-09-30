@@ -1,0 +1,155 @@
+---
+# playbooks/test-dotnet-bullet-proof.yml
+#
+# Test harness for validating the .NET portions of the chocoDeploy role
+# end-to-end. Runs against the TEST inventory only. Each phase is tagged so
+# you can run snapshot/seed/cleanup independently.
+#
+# Tags:
+#   snapshot - dump current .NET state (choco, vendor, registry, dotnet --list-runtimes)
+#   seed     - install EOL .NET 6/7 packages so the sweep has something to remove
+#   seed-fx  - downgrade the .NET Framework choco package (forces upgrade path on next run)
+#   cleanup  - remove anything the seed phase installed
+#   cleanup-fx - restore .NET Framework choco package to catalog floor
+#
+# Examples:
+#   ansible-playbook playbooks/test-dotnet-bullet-proof.yml \
+#     -i inventory/TEST/inv-TEST.yml \
+#     --vault-password-file=vault/.vault_key.txt \
+#     -l test-host-01.corp.example.com \
+#     --tags snapshot
+#
+#   ansible-playbook playbooks/test-dotnet-bullet-proof.yml \
+#     -i inventory/TEST/inv-TEST.yml \
+#     --vault-password-file=vault/.vault_key.txt \
+#     -l test-host-01.corp.example.com \
+#     --tags seed
+
+- name: chocoDeploy .NET test harness
+  hosts: all
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../vault/corp-ans-secret.yml"
+  vars:
+    # EOL .NET packages used to validate the sweep path.
+    # All four are below min_supported_track (8.0) per the role's default
+    # catalog. The sweep should remove all of them on a conversion run.
+    eol_dotnet_packages:
+      - {name: 'dotnet-6.0-aspnetruntime', version: '6.0.36'}
+      - {name: 'dotnet-7.0-aspnetruntime', version: '7.0.20'}
+      - {name: 'dotnet-7.0-runtime',       version: '7.0.20'}
+      - {name: 'dotnet-7.0-windowsdesktop-runtime', version: '7.0.20'}
+    # Older netfx-4.8.1 release used to force a re-install on the next run
+    # (validates the upgrade path on .NET Framework). 20230815 is an older
+    # GA release of the netfx-4.8.1 package that still installs successfully.
+    fx_downgrade_version: "4.8.1.20230815"
+    fx_catalog_version:   "4.8.1.20250219"
+
+  tasks:
+    - name: Snapshot | Capture current .NET state
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'SilentlyContinue'
+        $out = [ordered]@{}
+
+        $out.choco_dotnet = @(
+          & choco list --local-only --limit-output 2>$null |
+            Where-Object { $_ -match '^(dotnet-|netfx-)' }
+        )
+
+        $out.dotnet_list_runtimes = @()
+        $exe = Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'
+        if (Test-Path $exe) {
+          $out.dotnet_list_runtimes = @(& $exe --list-runtimes 2>$null)
+        }
+
+        $key = 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full'
+        $r = Get-ItemProperty -Path $key -Name Release -ErrorAction SilentlyContinue
+        $v = Get-ItemProperty -Path $key -Name Version -ErrorAction SilentlyContinue
+        $out.netfx_v4_release = if ($r) { [int]$r.Release } else { 0 }
+        $out.netfx_v4_version = if ($v) { $v.Version } else { '' }
+
+        $out.uninstall_dotnet = @(
+          Get-ItemProperty `
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', `
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.DisplayName -match '^Microsoft\s+(\.NET|ASP\.NET|Windows Desktop|.NET\s+Core)' -and
+              $_.DisplayName -notmatch '(SDK|Targeting Pack|Host FX Resolver)'
+            } |
+            ForEach-Object {
+              "$($_.DisplayName) | ver=$($_.DisplayVersion) | pub=$($_.Publisher)"
+            }
+        )
+
+        $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+        $rename = Get-ItemProperty -Path $key -Name PendingFileRenameOperations -ErrorAction SilentlyContinue
+        $out.pending_file_rename = if ($rename) { $true } else { $false }
+        $out.cbs_reboot_pending  = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
+        $out.wu_reboot_required  = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+
+        $out | ConvertTo-Json -Depth 4 -Compress
+      register: dotnet_snapshot
+      changed_when: false
+      tags: [snapshot, always]
+
+    - name: Snapshot | Display .NET state
+      ansible.builtin.debug:
+        msg: "{{ dotnet_snapshot.stdout | from_json }}"
+      tags: [snapshot, always]
+
+    - name: Seed | Install EOL .NET packages (below min_supported_track)
+      chocolatey.chocolatey.win_chocolatey:
+        name: "{{ item.name }}"
+        version: "{{ item.version }}"
+        state: present
+        ignore_checksums: true
+        timeout: 600
+      loop: "{{ eol_dotnet_packages }}"
+      loop_control:
+        label: "{{ item.name }} {{ item.version }}"
+      tags: [seed, never]
+
+    - name: Seed-FX | Downgrade netfx-4.8.1 to force upgrade on next run
+      chocolatey.chocolatey.win_chocolatey:
+        name: netfx-4.8.1
+        version: "{{ fx_downgrade_version }}"
+        state: present
+        force: true
+        ignore_checksums: true
+        timeout: 900
+      tags: [seed-fx, never]
+
+    - name: Seed-Modern | Downgrade dotnet-8.0-aspnetruntime to below catalog floor
+      # Used to validate the state:latest upgrade path. After this runs,
+      # choco owns 8.0.20 which is below the catalog floor 8.0.25. The
+      # next conversion/baseline run should use state:latest and upgrade.
+      chocolatey.chocolatey.win_chocolatey:
+        name: dotnet-8.0-aspnetruntime
+        version: "8.0.20"
+        state: present
+        force: true
+        ignore_checksums: true
+        timeout: 900
+      tags: [seed-modern, never]
+
+    - name: Cleanup | Uninstall EOL .NET packages
+      chocolatey.chocolatey.win_chocolatey:
+        name: "{{ item.name }}"
+        state: absent
+        timeout: 600
+      loop: "{{ eol_dotnet_packages }}"
+      loop_control:
+        label: "{{ item.name }}"
+      failed_when: false
+      tags: [cleanup, never]
+
+    - name: Cleanup-FX | Restore netfx-4.8.1 to catalog floor
+      chocolatey.chocolatey.win_chocolatey:
+        name: netfx-4.8.1
+        version: "{{ fx_catalog_version }}"
+        state: present
+        force: true
+        ignore_checksums: true
+        timeout: 900
+      tags: [cleanup-fx, never]

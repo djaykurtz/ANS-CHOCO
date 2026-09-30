@@ -1,0 +1,124 @@
+---
+# Resolve the managed app subset for this run.
+# Sentinel semantics:
+#   targetSoftware is null/unset -> target the full default managed catalog
+#                                   (apps marked requires_explicit_target are skipped)
+#   targetSoftware == []         -> explicitly skip all app alignment
+#                                   (runtime-only run when paired with targetRuntimes)
+#   targetSoftware is non-empty  -> filter to the listed ids / aliases
+
+- name: targetSelection | Build app token map
+  ansible.builtin.set_fact:
+    target_software_normalized: []
+    _target_software_provided: "{{ targetSoftware is not none }}"
+    choco_app_token_map: >-
+      {%- set m = {} -%}
+      {%- for app in choco_managed_apps -%}
+        {%- set _ = m.update({(app.key | lower): app.key}) -%}
+        {%- for a in (app.aliases | default([])) -%}
+          {%- set _ = m.update({(a | lower): app.key}) -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ m }}
+  changed_when: false
+
+- name: targetSelection | Normalize target software entries
+  ansible.builtin.set_fact:
+    target_software_normalized: >-
+      {{
+        target_software_normalized
+        + [
+            (
+              {
+                'requested_key': (item | lower),
+                'key': (choco_app_token_map[item | lower] | default(item | lower)),
+                'min_version': ''
+              }
+              if (item is string)
+              else {
+                'requested_key': (item.key | lower),
+                'key': (choco_app_token_map[item.key | lower] | default(item.key | lower)),
+                'min_version': (item.min_version | default(''))
+              }
+            )
+          ]
+      }}
+  loop: "{{ targetSoftware | default([], true) }}"
+  loop_control:
+    label: "{{ item if (item is string) else (item.key | default('invalid-target')) }}"
+  when:
+    - item is string or item is mapping
+    - (item is string) or (item.key is defined)
+  changed_when: false
+
+- name: targetSelection | Validate target software input shape
+  ansible.builtin.assert:
+    that:
+      - item is string or item is mapping
+      - (item is string) or (item.key is defined)
+    fail_msg: >-
+      targetSelection: each targetSoftware entry must be either a package id string
+      or a mapping with key/min_version. Got {{ item | to_nice_json }}
+    quiet: true
+  loop: "{{ targetSoftware | default([], true) }}"
+  loop_control:
+    label: "{{ item if (item is string) else (item.key | default('invalid-target')) }}"
+  changed_when: false
+
+- name: targetSelection | Build selected app ids
+  ansible.builtin.set_fact:
+    choco_selected_app_ids: >-
+      {{
+        (
+          (target_software_normalized | map(attribute='key') | list)
+          if (_target_software_provided | bool)
+          else (
+            choco_managed_apps
+            | rejectattr('requires_explicit_target', 'defined')
+            | map(attribute='key')
+            | list
+          )
+        )
+        | unique
+        | list
+      }}
+    choco_known_app_ids: "{{ choco_managed_apps | map(attribute='key') | list }}"
+    choco_known_app_tokens: "{{ choco_app_token_map.keys() | list | sort }}"
+  changed_when: false
+
+- name: targetSelection | Validate requested managed app ids
+  ansible.builtin.assert:
+    that:
+      - (choco_selected_app_ids | difference(choco_known_app_ids) | length) == 0
+    fail_msg: >-
+      targetSelection: unknown managed app ids or aliases requested: {{ choco_selected_app_ids | difference(choco_known_app_ids) }}.
+      Valid app ids: {{ choco_known_app_ids }}.
+      Valid ids and aliases: {{ choco_known_app_tokens }}
+    quiet: true
+  changed_when: false
+
+- name: targetSelection | Build selected app catalog and version overrides
+  ansible.builtin.set_fact:
+    choco_selected_apps: >-
+      {{ choco_managed_apps | selectattr('key', 'in', choco_selected_app_ids) | list }}
+    choco_target_min_version_map: >-
+      {%- set m = {} -%}
+      {%- for t in target_software_normalized -%}
+        {%- if t.min_version | default('') | length > 0 -%}
+          {%- set _ = m.update({t.key: t.min_version}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ m }}
+  changed_when: false
+
+- name: targetSelection | Summary
+  ansible.builtin.debug:
+    msg: >-
+      targetSelection:
+      mode={{ 'filter' if _target_software_provided else 'default-catalog' }},
+      selected_apps={{ choco_selected_apps | map(attribute='key') | list }},
+      requested={{ target_software_normalized | map(attribute='requested_key') | list }},
+      explicit_only_apps={{ choco_managed_apps | selectattr('requires_explicit_target', 'defined') | map(attribute='key') | list }},
+      version_overrides={{ choco_target_min_version_map | default({}) }}
+  when: choco_deploy_console_verbose | default(false) | bool
+  changed_when: false

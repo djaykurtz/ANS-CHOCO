@@ -1,0 +1,46 @@
+---
+- name: Create a Foreman host for Windows imaging
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    foreman_url: "{{ lookup('env','FOREMAN_URL') }}"
+    foreman_user: "{{ lookup('env','FOREMAN_USER') }}"
+    foreman_password: "{{ lookup('env','FOREMAN_PASSWORD') }}"
+    foreman_validate_certs: false   # set true if you have proper PKI
+
+    # Host specifics (usually fed in as pipeline variables)
+    new_host_name: "win-lab-001"
+    hostgroup_title: "Windows/Win11-Default"   # parent/child title path
+    subnet_name: "Example-Lab-Subnet"
+    domain_name: "lab.example.com"
+    arch_name: "x86_64"
+    os_name: "Windows 11"
+    mac_addr: "AA:BB:CC:DD:EE:FF"
+    pxe_loader: "iPXE UEFI HTTP"               # adjust for your environment
+
+  tasks:
+    - name: Ensure host is present and marked for build
+      theforeman.foreman.host:
+        server_url: "{{ foreman_url }}"
+        username: "{{ foreman_user }}"
+        password: "{{ foreman_password }}"
+        validate_certs: "{{ foreman_validate_certs }}"
+
+        name: "{{ new_host_name }}"
+        hostgroup: "{{ hostgroup_title }}"
+        mac: "{{ mac_addr }}"
+        managed: true
+        build: true
+        pxe_loader: "{{ pxe_loader }}"
+        operatingsystem: "{{ os_name }}"
+        architecture: "{{ arch_name }}"
+        domain: "{{ domain_name }}"
+        subnet: "{{ subnet_name }}"
+        enabled: true
+      register: host_result
+
+    - name: Show resulting host id and build status
+      debug:
+        msg: "Host {{ new_host_name }} => id={{ host_result.host.id }}, build={{ host_result.host.build }}"

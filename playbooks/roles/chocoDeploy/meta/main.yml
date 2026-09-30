@@ -1,0 +1,30 @@
+---
+galaxy_info:
+  role_name: choco_deploy
+  author: choco-fleet team
+  description: >-
+    Align approved Windows software through Chocolatey, manage runtime policy
+    for Python, .NET, and PowerShell Core, and produce per-host audit reports.
+  license: proprietary
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Windows
+      versions:
+        - "2019"
+        - "2022"
+        - "2025"
+        - all
+
+  galaxy_tags:
+    - windows
+    - chocolatey
+    - patching
+    - compliance
+    - software
+
+dependencies: []
+
+collections:
+  - chocolatey.chocolatey
+  - community.windows
+  - ansible.windows

@@ -1,0 +1,9 @@
+---
+- name: Apps | Align vscode.install
+  ansible.builtin.include_tasks: ops/install-one.yml
+  vars:
+    pkg:
+      name: vscode.install
+      version: "{{ choco_target_min_version_map[app_catalog_item.key] | default(acceptable_versions.applications.vscode_install.min_version) }}"
+      install_args: '/VERYSILENT /MERGETASKS=!runcode,addcontextmenufiles,addtopath'
+      registry_patterns: "{{ app_catalog_item.registry_patterns | default(['^Microsoft Visual Studio Code', '^Visual Studio Code$']) }}"

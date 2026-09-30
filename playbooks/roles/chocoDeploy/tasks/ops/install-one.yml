@@ -1,0 +1,836 @@
+---
+# ops/install-one.yml
+# Uses the one-time Chocolatey inventory and installed-program inventory.
+# For non-infra apps this performs conversion-to-Chocolatey behavior:
+#   - detect vendor/MSI installs by display name patterns
+#   - remove those installs best-effort
+#   - enforce the approved Chocolatey package/version
+
+- name: install-one | Normalize inputs
+  ansible.builtin.set_fact:
+    app_name: "{{ pkg.name }}"
+    app_min_version: "{{ pkg.version | default('') }}"
+    app_install_args: "{{ pkg.install_args | default('') }}"
+    app_conflicts: "{{ pkg.conflicts | default([]) }}"
+    app_registry_patterns: "{{ pkg.registry_patterns | default([]) }}"
+    app_registry_regex: "{{ '(?i)' ~ ((pkg.registry_patterns | default([])) | join('|')) if ((pkg.registry_patterns | default([])) | length > 0) else '' }}"
+    app_source_name: >-
+      {{
+        pkg.source_name
+        | default(
+            (
+              trusted_choco_source.name
+              if (pkg.name in (choco_internalized_package_ids | default(chocoInternalRepo | default([]))))
+              else (
+                (choco_public_source_effective | default(choco_public_source_name | default('chocolatey')))
+                if (choco_explicit_source_routing | default(true) | bool)
+                else ''
+              )
+            )
+          )
+      }}
+    app_present: false
+    app_installed_version: ''
+    app_ok: false
+    _install_skip_due_to_vendor: false
+  changed_when: false
+
+- name: install-one | Resolve install timeout from app size bucket
+  ansible.builtin.set_fact:
+    app_install_size: "{{ pkg.install_size | default((app_catalog_item | default({})).install_size | default('medium')) | lower }}"
+    _install_timeout: >-
+      {{
+        {
+          'small': choco_deploy_install_timeout_small | default(300),
+          'medium': choco_deploy_install_timeout_medium | default(900),
+          'large': choco_deploy_install_timeout_large | default(2700)
+        }[(pkg.install_size | default((app_catalog_item | default({})).install_size | default('medium')) | lower)]
+        | default(choco_deploy_install_timeout | default(900))
+      }}
+    _install_task_timeout: >-
+      {{
+        {
+          'small': choco_deploy_task_timeout_small | default(360),
+          'medium': choco_deploy_task_timeout_medium | default(1080),
+          'large': choco_deploy_task_timeout_large | default(3000)
+        }[(pkg.install_size | default((app_catalog_item | default({})).install_size | default('medium')) | lower)]
+        | default(choco_deploy_task_timeout_medium | default(1080))
+      }}
+    # Resolve catalog-level scripts. The per-app task files (apps/*.yml)
+    # build a minimal `pkg` dict that does NOT pass through pre_remove_script
+    # or force_orphan_cleanup_script from the catalog. We look those up from
+    # `app_catalog_item` (the original catalog entry the caller iterated over)
+    # so install-one can use them. If `pkg` does provide them, that takes
+    # precedence to preserve any caller-side override.
+    _pkg_pre_remove_script: >-
+      {{
+        pkg.pre_remove_script
+        | default((app_catalog_item | default({})).pre_remove_script | default(''))
+      }}
+    _pkg_force_orphan_cleanup_script: >-
+      {{
+        pkg.force_orphan_cleanup_script
+        | default((app_catalog_item | default({})).force_orphan_cleanup_script | default(''))
+      }}
+  changed_when: false
+
+- name: install-one | Read installed presence from inventory map
+  ansible.builtin.set_fact:
+    app_present: "{{ (choco_installed_map[app_name] is defined) }}"
+    app_installed_version: "{{ (choco_installed_map[app_name] | default('')) }}"
+  changed_when: false
+
+# Vendor-drift reconciliation:
+# Read DisplayVersion from the uninstall registry regardless of whether
+# Chocolatey claims ownership. Apps with self-updaters (Greenshot, VS Code,
+# Docker Desktop, etc.) can advance past Chocolatey's recorded version, which
+# would otherwise let a drifted host appear compliant when it isn't, or
+# trigger an unintended downgrade. The compliance check below uses the higher
+# of (choco-recorded, registry-detected) so reality wins.
+- name: install-one | Match registry entries for this app
+  ansible.builtin.set_fact:
+    app_registry_matches: >-
+      {{
+        (system_installed_programs | default([])
+          | selectattr('display_name', 'defined')
+          | selectattr('display_name', 'search', app_registry_regex)
+          | list)
+        if (app_registry_regex | length > 0)
+        else []
+      }}
+  changed_when: false
+
+- name: install-one | Extract registry DisplayVersion (sanitized to numeric semver)
+  ansible.builtin.set_fact:
+    app_registry_version: >-
+      {{
+        ((app_registry_matches
+          | selectattr('display_version', 'defined')
+          | map(attribute='display_version')
+          | select('match', '^[0-9]+(\.[0-9]+)*')
+          | list
+          | first
+          | default('', true)) | regex_search('^[0-9]+(\.[0-9]+)*'))
+        | default('', true)
+      }}
+  changed_when: false
+
+- name: install-one | Detect drift and compute resolved version
+  ansible.builtin.set_fact:
+    app_drift_detected: >-
+      {{
+        (app_installed_version | length > 0)
+        and (app_registry_version | length > 0)
+        and (app_registry_version is version(app_installed_version, '>'))
+      }}
+    app_resolved_version: >-
+      {{
+        app_registry_version
+        if (
+          (app_installed_version | length == 0)
+          or (
+            (app_registry_version | length > 0)
+            and (app_registry_version is version(app_installed_version, '>'))
+          )
+        )
+        else app_installed_version
+      }}
+  changed_when: false
+
+- name: install-one | Detect choco-orphan (lib says installed, registry empty)
+  ansible.builtin.set_fact:
+    app_choco_orphan: >-
+      {{
+        app_present
+        and (app_registry_patterns | length > 0)
+        and ((app_registry_matches | default([])) | length == 0)
+      }}
+  changed_when: false
+
+- name: install-one | Evaluate installed version against minimum
+  ansible.builtin.set_fact:
+    app_ok: >-
+      {{
+        (not app_choco_orphan)
+        and (app_present or (app_resolved_version | length > 0))
+        and (
+          (app_min_version | length == 0)
+          or (
+            (app_resolved_version | length > 0)
+            and (app_resolved_version is version(app_min_version, '>='))
+          )
+        )
+      }}
+  changed_when: false
+
+- name: install-one | Discover non-Chocolatey installs that should be converted
+  ansible.builtin.set_fact:
+    app_vendor_matches: >-
+      {{
+        (
+          (app_registry_matches
+            | rejectattr('publisher', 'defined')
+            | list)
+          +
+          (app_registry_matches
+            | selectattr('publisher', 'defined')
+            | rejectattr('publisher', 'search', '(?i)chocolatey')
+            | list)
+        )
+        if ((app_registry_patterns | length > 0) and (not app_present))
+        else []
+      }}
+  changed_when: false
+
+- name: install-one | Determine alignment action
+  ansible.builtin.set_fact:
+    app_vendor_present: "{{ (app_vendor_matches | length) > 0 }}"
+    app_requires_alignment: "{{ (not app_ok) or ((app_vendor_matches | length) > 0) }}"
+  changed_when: false
+
+- name: install-one | OK - already at/above minimum and already Chocolatey-managed
+  ansible.builtin.debug:
+    msg: "install-one: OK - {{ app_name }} {{ app_installed_version }} (min={{ app_min_version }})"
+  when:
+    - app_ok
+    - not app_vendor_present
+    - choco_deploy_console_verbose | default(false) | bool
+  changed_when: false
+
+- name: install-one | Record no-change audit event
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': 'NoChange',
+            'software': app_name,
+            'previous_version': app_resolved_version,
+            'new_version': app_resolved_version,
+            'source': ('chocolatey' if app_present else 'vendor'),
+            'notes': (
+              'Already aligned at or above minimum ' ~ app_min_version
+              ~ (
+                  ' (DRIFT: choco=' ~ app_installed_version
+                  ~ ', registry=' ~ app_registry_version ~ ')'
+                  if app_drift_detected else ''
+                )
+            )
+          }
+        ]
+      }}
+  when:
+    - app_ok
+    - not app_vendor_present
+  changed_when: false
+
+- name: install-one | Debug conversion candidates
+  ansible.builtin.debug:
+    msg: >-
+      install-one: convert vendor installs for {{ app_name }} =>
+      {{ app_vendor_matches | map(attribute='display_name') | list }}
+  when:
+    - app_vendor_matches | length > 0
+    - choco_deploy_console_verbose | default(false) | bool
+  changed_when: false
+
+- name: install-one | Run app pre-removal script before vendor cleanup
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    {{ _pkg_pre_remove_script | default('') }}
+    "PreRemoveDone"
+  when:
+    - app_vendor_matches | length > 0
+    - (_pkg_pre_remove_script | default('') | trim | length) > 0
+  changed_when: false
+  failed_when: false
+
+- name: install-one | Remove non-Chocolatey installs before Chocolatey alignment
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $itemsJson = @'
+    {{ app_vendor_matches | to_json }}
+    '@
+    $items = @()
+    if ($itemsJson.Trim()) {
+      $parsed = $itemsJson | ConvertFrom-Json
+      if ($parsed -is [System.Array]) {
+        $items = $parsed
+      } elseif ($null -ne $parsed) {
+        $items = @($parsed)
+      }
+    }
+
+    foreach ($i in $items) {
+      if ($i.quiet_uninstall) {
+        $qu = $i.quiet_uninstall
+        if ($qu -match 'unins\d+\.exe') {
+          $qu = $qu -replace '/SILENT','/VERYSILENT'
+          if ($qu -notmatch '/VERYSILENT') { $qu = $qu + ' /VERYSILENT' }
+          $qu = $qu + ' /SUPPRESSMSGBOXES /NORESTART'
+        }
+        if ($qu -match '^"([^"]+)"\s*(.*)$') {
+          $proc = Start-Process -FilePath $Matches[1] -ArgumentList $Matches[2] -PassThru -WindowStyle Hidden
+          if (-not $proc.WaitForExit(120000)) { $proc | Stop-Process -Force -ErrorAction SilentlyContinue }
+        } else {
+          $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList "/c $qu" -PassThru -WindowStyle Hidden
+          if (-not $proc.WaitForExit(120000)) { $proc | Stop-Process -Force -ErrorAction SilentlyContinue }
+        }
+        continue
+      }
+
+      if ($i.product_code -match '^\{?[0-9A-Fa-f\-]{36}\}?$') {
+        $code = $i.product_code
+        if ($code -notmatch '^\{') { $code = '{' + $code + '}' }
+        $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList "/x $code /qn /norestart" -PassThru -WindowStyle Hidden
+        if (-not $proc.WaitForExit(120000)) { $proc | Stop-Process -Force -ErrorAction SilentlyContinue }
+        continue
+      }
+
+      if ($i.uninstall_string) {
+        $us = $i.uninstall_string
+        if ($us -match 'unins\d+\.exe') {
+          $us = $us -replace '/SILENT','/VERYSILENT'
+          if ($us -notmatch '/VERYSILENT') { $us = $us + ' /VERYSILENT' }
+          $us = $us + ' /SUPPRESSMSGBOXES /NORESTART'
+        }
+        if ($us -match '^"([^"]+)"\s*(.*)$') {
+          $proc = Start-Process -FilePath $Matches[1] -ArgumentList $Matches[2] -PassThru -WindowStyle Hidden
+          if (-not $proc.WaitForExit(120000)) { $proc | Stop-Process -Force -ErrorAction SilentlyContinue }
+        } else {
+          $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList "/c $us" -PassThru -WindowStyle Hidden
+          if (-not $proc.WaitForExit(120000)) { $proc | Stop-Process -Force -ErrorAction SilentlyContinue }
+        }
+      }
+    }
+
+    "RemovedCandidates=$($items.Count)"
+  register: app_vendor_remove
+  when: app_vendor_matches | length > 0
+  changed_when: true
+  failed_when: false
+
+- name: install-one | Record vendor removal errors in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_errors: >-
+      {{
+        choco_deploy_report_errors + [
+          {
+            'software': app_name,
+            'operation': 'vendor_remove',
+            'message': (
+              (app_vendor_remove.stderr | default('') | trim)
+              if (app_vendor_remove.stderr | default('') | trim | length) > 0
+              else (app_vendor_remove.stdout | default('') | trim)
+            )
+          }
+        ]
+      }}
+  when:
+    - app_vendor_remove is defined
+    - (app_vendor_remove.rc | default(0) | int) != 0
+  changed_when: false
+
+# Pre-install vendor verification. The vendor uninstaller may exit success
+# while a child uninstaller process is still running (typical for JetBrains
+# IDEs, Inno Setup, NSIS, and any installer that forks a tear-down helper
+# into %TEMP%). Re-check the registry here BEFORE the Chocolatey install
+# runs, with bounded retries so an async uninstaller has a chance to actually
+# clear its registry entry. If the vendor entry survives, skip the choco
+# install for this app and emit an error event so the run continues with
+# the other apps instead of stacking a choco install on top of a
+# half-removed vendor copy (which is what historically caused multi-minute
+# hangs on JetBrains-style installers).
+- name: install-one | Verify vendor removals via registry re-check (pre-install)
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $pattern = '{{ app_registry_regex }}'
+    $chocoVersion = '{{ app_min_version }}'
+    if (-not $pattern) { '[]'; return }
+    $still = @()
+    $paths = @(
+      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    # Build a MAJOR.MINOR prefix from the choco package version so we
+    # accept the registry as "already aligned" when the vendor product
+    # version differs only in patch / build digits. This covers:
+    #   - wrapper packages (choco 4.76.1 + vendor 4.76.0)
+    #   - JetBrains-style (choco 2026.1.0 + DisplayName "PyCharm 2026.1")
+    # Falls back to the full chocoVersion string if it has fewer than
+    # two dots.
+    $verParts = $chocoVersion.Split('.')
+    if ($verParts.Length -ge 2) {
+      $verPrefix = $verParts[0] + '.' + $verParts[1]
+    } else {
+      $verPrefix = $chocoVersion
+    }
+    $prefixEsc = [regex]::Escape($verPrefix)
+    foreach ($p in $paths) {
+      Get-ItemProperty $p |
+        Where-Object {
+          $nameMatch = $_.DisplayName -match $pattern
+          $verInName = $_.DisplayName -match $prefixEsc
+          $verInVer  = $_.DisplayVersion -match $prefixEsc
+          $nameMatch -and -not ($verInName -or $verInVer)
+        } |
+        ForEach-Object {
+          $still += [pscustomobject]@{
+            DisplayName = $_.DisplayName
+            DisplayVersion = $_.DisplayVersion
+          }
+        }
+    }
+    $still | ConvertTo-Json -Compress
+  register: _install_vendor_verify_raw
+  when:
+    # Skipped registered tasks STILL define the register variable in
+    # Ansible. `app_vendor_remove is defined` is true even when the
+    # vendor-remove task was skipped (because the upstream
+    # `when: app_vendor_matches | length > 0` didn't match). Without
+    # the explicit `.skipped` check, this verify task fires on every
+    # routine align where the host already has the package installed
+    # via choco (publisher will be the vendor, not Chocolatey, but
+    # app_present=true keeps app_vendor_matches empty - we never
+    # uninstalled anything, there's nothing to verify). Caught on
+    # docker-desktop June 9 2026.
+    - app_vendor_remove is defined
+    - not (app_vendor_remove.skipped | default(false) | bool)
+    - app_registry_regex | length > 0
+  changed_when: false
+  failed_when: false
+  retries: "{{ choco_deploy_vendor_verify_retries | default(6) }}"
+  delay: "{{ choco_deploy_vendor_verify_delay | default(5) }}"
+  until: >-
+    (_install_vendor_verify_raw.stdout | default('') | trim) == ''
+    or (_install_vendor_verify_raw.stdout | default('') | trim) == '[]'
+    or (_install_vendor_verify_raw.stdout | default('') | trim) == 'null'
+
+- name: install-one | Initialize vendor still-present list
+  ansible.builtin.set_fact:
+    _install_vendor_still_present: []
+  changed_when: false
+
+- name: install-one | Parse vendor removal verification
+  ansible.builtin.set_fact:
+    _install_vendor_still_present: "{{ _install_vendor_verify_raw.stdout | from_json }}"
+  when:
+    - _install_vendor_verify_raw is defined
+    - _install_vendor_verify_raw.stdout is defined
+    - (_install_vendor_verify_raw.stdout | default('') | trim | length) > 0
+    - (_install_vendor_verify_raw.stdout | default('') | trim) != '[]'
+  changed_when: false
+
+- name: install-one | Normalize vendor verification to list
+  ansible.builtin.set_fact:
+    _install_vendor_still_present: >-
+      {{ (_install_vendor_still_present if (_install_vendor_still_present is iterable and _install_vendor_still_present is not string and _install_vendor_still_present is not mapping) else [_install_vendor_still_present]) | default([]) }}
+  when: _install_vendor_still_present is defined
+  changed_when: false
+
+- name: install-one | Build list of vendor display names still present
+  ansible.builtin.set_fact:
+    _install_vendor_still_names: "{{ _install_vendor_still_present | default([]) | map(attribute='DisplayName') | list }}"
+  when: app_vendor_remove is defined
+  changed_when: false
+
+- name: install-one | Decide whether to skip Chocolatey install due to surviving vendor copy
+  ansible.builtin.set_fact:
+    _install_skip_due_to_vendor: >-
+      {{
+        (app_vendor_remove is defined)
+        and ((_install_vendor_still_present | default([]) | length) > 0)
+      }}
+  changed_when: false
+
+# Optional orphan-cleanup escape hatch.
+# When the post-uninstall verify shows the vendor still present, normally we
+# skip the Chocolatey install to avoid stacking. For apps that ship a
+# pkg.force_orphan_cleanup_script (currently: greenshot), an operator can set
+# a per-app flag <app_name>_force_replace_orphan=true on the command line to
+# nuke the orphan registry entry + residual install dir and let the
+# Chocolatey install run on a clean slate. This is opt-in per run; without
+# the flag, the default skip behavior is unchanged.
+- name: install-one | Resolve force-replace-orphan flag for this app
+  ansible.builtin.set_fact:
+    _install_force_replace_orphan: >-
+      {{
+        (lookup('vars', (app_name | replace('.', '_') | replace('-', '_')) ~ '_force_replace_orphan', default=false))
+        | bool
+      }}
+    _install_vendor_still_present_pre_cleanup: "{{ _install_vendor_still_present | default([]) }}"
+  changed_when: false
+
+- name: install-one | Run app-specific orphan cleanup script
+  ansible.windows.win_shell: "{{ _pkg_force_orphan_cleanup_script }}"
+  register: _install_orphan_cleanup
+  when:
+    - _install_skip_due_to_vendor | bool
+    - _install_force_replace_orphan | bool
+    - (_pkg_force_orphan_cleanup_script | default('') | trim | length) > 0
+  changed_when: true
+  failed_when: false
+
+- name: install-one | Re-verify vendor removal after orphan cleanup
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $pattern = '{{ app_registry_regex }}'
+    $chocoVersion = '{{ app_min_version }}'
+    if (-not $pattern) { '[]'; return }
+    $still = @()
+    $paths = @(
+      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    foreach ($p in $paths) {
+      Get-ItemProperty $p |
+        Where-Object {
+          $_.DisplayName -match $pattern -and
+          (-not ($_.DisplayName -match [regex]::Escape($chocoVersion)))
+        } |
+        ForEach-Object {
+          $still += [pscustomobject]@{
+            DisplayName = $_.DisplayName
+            DisplayVersion = $_.DisplayVersion
+          }
+        }
+    }
+    $still | ConvertTo-Json -Compress
+  register: _install_orphan_reverify_raw
+  when:
+    - _install_skip_due_to_vendor | bool
+    - _install_force_replace_orphan | bool
+    - _install_orphan_cleanup is defined
+    - _install_orphan_cleanup is not skipped
+  changed_when: false
+  failed_when: false
+
+- name: install-one | Clear skip if orphan cleanup succeeded
+  ansible.builtin.set_fact:
+    _install_skip_due_to_vendor: false
+    _install_vendor_still_present: []
+    _install_vendor_still_names: []
+  when:
+    - _install_skip_due_to_vendor | bool
+    - _install_force_replace_orphan | bool
+    - _install_orphan_reverify_raw is defined
+    - _install_orphan_reverify_raw is not skipped
+    - (_install_orphan_reverify_raw.stdout | default('') | trim) in ['', '[]', 'null']
+  changed_when: false
+
+- name: install-one | Record orphan cleanup recovery in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': 'Removed',
+            'software': (orphan_item.DisplayName | default(app_name)),
+            'previous_version': (orphan_item.DisplayVersion | default('')),
+            'new_version': '',
+            'source': 'vendor-orphan',
+            'notes': ('Orphan vendor registry entry removed by force_replace_orphan; Chocolatey install will proceed on a clean slate')
+          }
+        ]
+      }}
+  loop: "{{ _install_vendor_still_present_pre_cleanup | default([]) }}"
+  loop_control:
+    loop_var: orphan_item
+    label: "{{ orphan_item.DisplayName | default(app_name) }}"
+  when:
+    - _install_force_replace_orphan | bool
+    - _install_orphan_cleanup is defined
+    - _install_orphan_cleanup is not skipped
+    - not (_install_skip_due_to_vendor | bool)
+  changed_when: false
+
+- name: install-one | Record vendor uninstall failures (pre-install verify)
+  ansible.builtin.set_fact:
+    choco_deploy_report_errors: >-
+      {{
+        choco_deploy_report_errors + [
+          {
+            'software': (still_item.DisplayName | default(app_name)),
+            'operation': 'vendor_remove_verify',
+            'message': ('Vendor uninstall ran but ' ~ (still_item.DisplayName | default(app_name)) ~ ' ' ~ (still_item.DisplayVersion | default('')) ~ ' is still detected in the registry; skipping Chocolatey install for ' ~ app_name ~ ' to avoid stacking on a half-removed vendor copy')
+          }
+        ]
+      }}
+  loop: "{{ _install_vendor_still_present | default([]) }}"
+  loop_control:
+    loop_var: still_item
+    label: "{{ still_item.DisplayName | default(app_name) }}"
+  when: _install_skip_due_to_vendor | bool
+  changed_when: false
+
+- name: install-one | Announce skip due to surviving vendor copy
+  ansible.builtin.debug:
+    msg: >-
+      install-one: SKIP {{ app_name }} - vendor copies still present after uninstall:
+      {{ _install_vendor_still_names | default([]) }}.
+      The Chocolatey install is being skipped to avoid a hung stacked install.
+      Investigate the vendor uninstaller (often: the IDE is running, a child
+      uninstaller process is still in flight, or the uninstaller exits success
+      while leaving the Uninstall registry entry behind) and re-run.
+      If the package supports it, you can override this skip with
+      `-e "{{ app_name | replace('.', '_') | replace('-', '_') }}_force_replace_orphan=true"`.
+  when: _install_skip_due_to_vendor | bool
+  changed_when: false
+
+# conflicts cleanup when not aligned
+- name: install-one | Remove conflicting Chocolatey packages
+  chocolatey.chocolatey.win_chocolatey:
+    name: "{{ conflict_pkg }}"
+    state: absent
+  loop: "{{ app_conflicts }}"
+  loop_control:
+    loop_var: conflict_pkg
+    label: "{{ conflict_pkg }}"
+  register: app_conflict_remove_results
+  failed_when: false
+  when:
+    - app_requires_alignment
+    - not (_install_skip_due_to_vendor | bool)
+    - (app_conflicts | length) > 0
+
+- name: install-one | Record conflict removal errors in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_errors: >-
+      {{
+        choco_deploy_report_errors + [
+          {
+            'software': app_name,
+            'operation': ('remove_conflict:' ~ (conflict_result.item | default('unknown'))),
+            'message': (
+              (conflict_result.msg | default('') | trim)
+              if (conflict_result.msg | default('') | trim | length) > 0
+              else ((conflict_result.stderr | default('') | trim) if (conflict_result.stderr | default('') | trim | length) > 0 else 'Conflict removal failed')
+            )
+          }
+        ]
+      }}
+  loop: "{{ app_conflict_remove_results.results | default([]) }}"
+  loop_control:
+    loop_var: conflict_result
+    label: "{{ conflict_result.item | default('unknown') }}"
+  when: conflict_result.failed | default(false)
+  changed_when: false
+
+# Enforce minimum via Chocolatey when not aligned. The Ansible task-level
+# timeout: keyword is a hard wall-clock cap, in contrast to the module's own
+# timeout: parameter which is forwarded to Chocolatey as --execution-timeout
+# (only advances while choco believes work is progressing). The task-level
+# cap is what actually kills an idle WinRM session or stuck installer.
+#
+# state selection:
+#   - Fresh install (app not present in choco inventory): state=present with
+#     the catalog min_version, so the install pins to the approved floor.
+#   - Upgrade (app present but below min_version): state=latest. The
+#     win_chocolatey module's state=present + version=X path treats "any
+#     version installed" as a no-op and never invokes choco upgrade, even
+#     with force=true. state=latest is the idiomatic upgrade path; we rely
+#     on the catalog floor to pre-stage the feed so latest >= min_version.
+- name: install-one | Align package with Chocolatey
+  chocolatey.chocolatey.win_chocolatey:
+    name: "{{ app_name }}"
+    version: "{{ app_min_version if (app_min_version | length > 0 and not app_present) else omit }}"
+    source: "{{ app_source_name if (app_source_name | length > 0) else omit }}"
+    state: "{{ 'latest' if app_present else 'present' }}"
+    force: "{{ (choco_force_install | default(true) | bool) or (app_choco_orphan | default(false) | bool) }}"
+    ignore_checksums: "{{ choco_ignore_checksums | default(true) | bool }}"
+    timeout: "{{ _install_timeout | int }}"
+    install_args: "{{ app_install_args if (app_install_args | length > 0) else omit }}"
+  register: app_install
+  failed_when: false
+  timeout: "{{ _install_task_timeout | int }}"
+  when:
+    # `app_requires_alignment` is the proper conversion-mode gate.
+    # `not app_ok` alone is WRONG for conversion: in conversion mode the
+    # vendor install at the right version makes `app_ok=true` BEFORE the
+    # uninstall, so the Align task would skip after the uninstall - the
+    # role would correctly remove the vendor copy, but never install the
+    # choco replacement. `app_requires_alignment` evaluates to
+    # `(not app_ok) OR (app_vendor_matches > 0)` and was designed for
+    # exactly this case. Caught on docker-desktop conversion June 9 2026.
+    - app_requires_alignment | bool
+    - not (_install_skip_due_to_vendor | bool)
+
+# Post-install verification: query choco for actual on-disk state.
+#
+# The Align task above uses `failed_when: false` so the task itself never
+# reports failure. That has the side-effect of forcing the registered var's
+# `app_install.failed` attribute to False even when choco actually failed
+# (e.g. "Unable to resolve dependency 'dotnetfx'", "Chocolatey installed
+# 0/1 packages"). So an error-recording gate on `app_install.failed` will
+# NEVER fire and silent failures slip through as `errors: 0` in the report,
+# leaving the host with NOTHING installed after a successful vendor removal.
+#
+# Verified June 10 2026 on test-host-01: vendor 4.77 -> choco 4.76 conversion
+# logged 1 Removed event, 0 Installed events, errors=0, while the host
+# was actually left Docker-less. The fix is a post-install reality check.
+- name: install-one | Refresh package version in map (always, post-Align verification)
+  ansible.windows.win_command: >
+    choco list --local-only --exact --limit-output {{ app_name }}
+  register: app_refresh
+  changed_when: false
+  failed_when: false
+  when:
+    - app_install is defined
+    - not (app_install.skipped | default(false) | bool)
+
+- name: install-one | Compute install outcome from post-Align reality
+  ansible.builtin.set_fact:
+    _install_postcheck_version: >-
+      {{
+        ((app_refresh.stdout | default('') | trim).split('|')[-1] | trim)
+        if (app_refresh is defined and (app_refresh.stdout | default('') | trim | length) > 0)
+        else ''
+      }}
+  when:
+    - app_install is defined
+    - not (app_install.skipped | default(false) | bool)
+  changed_when: false
+
+- name: install-one | Evaluate install success
+  ansible.builtin.set_fact:
+    _install_succeeded: >-
+      {{
+        (_install_postcheck_version | length > 0)
+        and (
+          (app_min_version | length == 0)
+          or (_install_postcheck_version is version(app_min_version, '>='))
+        )
+      }}
+  when:
+    - app_install is defined
+    - not (app_install.skipped | default(false) | bool)
+  changed_when: false
+
+- name: install-one | Update map with refreshed version
+  ansible.builtin.set_fact:
+    choco_installed_map: >-
+      {{
+        choco_installed_map
+        | combine({ app_name: _install_postcheck_version })
+      }}
+  changed_when: false
+  when:
+    - app_install is defined
+    - not (app_install.skipped | default(false) | bool)
+    - (_install_postcheck_version | default('') | length) > 0
+
+- name: install-one | Record install errors in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_errors: >-
+      {{
+        choco_deploy_report_errors + [
+          {
+            'software': app_name,
+            'operation': 'install_or_upgrade',
+            'message': (
+              'Install verify failed: choco package ' ~ app_name
+              ~ ' not at expected version >=' ~ (app_min_version if (app_min_version | length > 0) else 'any')
+              ~ ' (post-Align: '
+              ~ (_install_postcheck_version if (_install_postcheck_version | length > 0) else 'not present')
+              ~ '). choco rc=' ~ (app_install.rc | default('?') | string)
+              ~ '. tail(stdout)=' ~ ((app_install.stdout | default('') | trim)[-300:] | replace('\n', ' | '))
+            )
+          }
+        ]
+      }}
+  when:
+    - app_install is defined
+    - not (app_install.skipped | default(false) | bool)
+    - not (_install_succeeded | default(true) | bool)
+  changed_when: false
+
+# Vendor verification has already happened pre-install (see the
+# "Verify vendor removals via registry re-check (pre-install)" block above).
+# At this point _install_vendor_still_present and _install_vendor_still_names
+# already reflect what survived the uninstaller and triggered an
+# 'vendor_remove_verify' error event if applicable.
+
+- name: install-one | Record vendor removals in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': 'Removed',
+            'software': (item.display_name | default(app_name)),
+            'previous_version': (item.display_version | default('unknown')),
+            'new_version': '',
+            'source': 'vendor',
+            'notes': ('Vendor install removed; replaced by Chocolatey package ' ~ app_name)
+          }
+        ]
+      }}
+  loop: "{{ app_vendor_matches | default([]) }}"
+  loop_control:
+    label: "{{ item.display_name | default(app_name) }}"
+  when:
+    # Same skipped-register guard as the verify task above. Without
+    # `not (...skipped)` this would record a phantom "Removed vendor
+    # install" event for every routine align where the vendor was
+    # never actually removed (skipped registered vars still pass
+    # `is defined`).
+    - app_vendor_remove is defined
+    - not (app_vendor_remove.skipped | default(false) | bool)
+    - (item.display_name | default(app_name)) not in (_install_vendor_still_names | default([]))
+  changed_when: false
+
+- name: install-one | Record Chocolatey package change in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': (
+              'Upgraded' if app_present
+              else (
+                'Converted'
+                if (app_vendor_present | default(false))
+                else 'Installed'
+              )
+            ),
+            'software': app_name,
+            'previous_version': (app_installed_version if app_present else ''),
+            'new_version': (((app_refresh.stdout | default('') | trim).split('|')[-1] | trim) if ((app_refresh.stdout | default('') | trim | length) > 0) else app_min_version),
+            'source': 'chocolatey',
+            'notes': (
+              ('Chocolatey took ownership of existing vendor install; deployment=' ~ deployment)
+              if (
+                (app_vendor_present | default(false))
+                and (not app_present)
+                and (app_vendor_remove is not defined)
+              )
+              else (
+                ('Vendor install removed and replaced with Chocolatey package; deployment=' ~ deployment)
+                if (app_vendor_remove is defined)
+                else ('Deployment=' ~ deployment)
+              )
+            )
+          }
+        ]
+      }}
+  when:
+    - app_install is defined
+    - app_install.changed | default(false)
+    # Gate on post-install reality, not on app_install.failed: failed_when:false
+    # on the Align task forces app_install.failed to False even when choco
+    # actually failed (e.g. dependency resolution). _install_succeeded checks
+    # the on-disk choco lib state.
+    - _install_succeeded | default(false) | bool
+  changed_when: false
+
+- name: install-one | Summary
+  ansible.builtin.debug:
+    msg: >-
+      install-one summary:
+      app={{ app_name }},
+      choco_ok_pre={{ app_ok }},
+      vendor_matches={{ (app_vendor_matches | default([])) | length }},
+      vendor_removed={{ app_vendor_remove is defined }},
+      choco_changed={{ app_install.changed | default(false) }}
+  when: choco_deploy_console_verbose | default(false) | bool
+  changed_when: false

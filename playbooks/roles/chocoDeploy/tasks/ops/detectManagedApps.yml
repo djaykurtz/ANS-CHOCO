@@ -1,0 +1,84 @@
+---
+# detectManagedApps.yml
+# Precompute the app list that would be processed for the active deployment mode.
+
+- name: detectManagedApps | Initialize detected managed apps
+  ansible.builtin.set_fact:
+    detected_managed_apps: []
+    _remove_package_ids: >-
+      {%- set ids = [] -%}
+      {%- for r in (choco_selected_remove_items | default([])) -%}
+        {%- for p in (r.detect_packages | default([r.key])) -%}
+          {%- set _ = ids.append(p) -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ ids | unique | list }}
+  changed_when: false
+
+- name: detectManagedApps | Determine conversion candidates
+  ansible.builtin.set_fact:
+    detected_managed_apps: "{{ detected_managed_apps + [item] }}"
+  loop: "{{ choco_selected_apps }}"
+  when:
+    - deployment == 'choco_conversion'
+    - (item.detect_packages | default([item.key])) | intersect(_remove_package_ids) | length == 0
+    - >-
+      (
+        (item.detect_packages | default([item.key]))
+        | intersect(choco_installed_map.keys() | list)
+        | length > 0
+      )
+      or
+      (
+        (item.registry_patterns | default([]) | length > 0)
+        and
+        (system_installed_program_names_blob | default('') is search('(?im)' ~ ((item.registry_patterns | default([])) | join('|'))))
+      )
+  loop_control:
+    label: "{{ item.key }}"
+  changed_when: false
+
+- name: detectManagedApps | Determine Chocolatey update candidates
+  ansible.builtin.set_fact:
+    detected_managed_apps: "{{ detected_managed_apps + [item] }}"
+  loop: "{{ choco_selected_apps }}"
+  when:
+    - deployment == 'choco_update'
+    - (item.detect_packages | default([item.key])) | intersect(_remove_package_ids) | length == 0
+    - >-
+      (item.detect_packages | default([item.key]))
+      | intersect(choco_installed_map.keys() | list)
+      | length > 0
+  loop_control:
+    label: "{{ item.key }}"
+  changed_when: false
+
+- name: detectManagedApps | Use full selected catalog for baseline
+  ansible.builtin.set_fact:
+    detected_managed_apps: >-
+      {{ choco_selected_apps | default([]) | rejectattr('key', 'in', _remove_package_ids) | list }}
+  when: deployment == 'choco_baseline'
+  changed_when: false
+
+# choco_selective: process exactly the explicitly-named apps, regardless of
+# whether they are already present. install-one then decides per-node whether
+# to install net-new (clean host), convert (vendor install), or upgrade
+# (choco-owned). Unlike baseline, this mode is guarded to REQUIRE a non-empty
+# targetSoftware (enforced in main.yml), so it can never fall back to the full
+# default catalog. Unlike conversion/update, it DOES install on clean hosts.
+- name: detectManagedApps | Use explicitly-named catalog for selective
+  ansible.builtin.set_fact:
+    detected_managed_apps: >-
+      {{ choco_selected_apps | default([]) | rejectattr('key', 'in', _remove_package_ids) | list }}
+  when: deployment == 'choco_selective'
+  changed_when: false
+
+- name: detectManagedApps | Summary
+  ansible.builtin.debug:
+    msg: >-
+      detectManagedApps:
+      deployment={{ deployment }},
+      detected_existing_software={{ detected_managed_apps | map(attribute='key') | list }},
+      target_software={{ choco_selected_apps | default([]) | map(attribute='key') | list }}
+  when: choco_deploy_console_verbose | default(false) | bool
+  changed_when: false

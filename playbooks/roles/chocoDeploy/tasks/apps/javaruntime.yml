@@ -1,0 +1,8 @@
+---
+- name: Apps | Align javaruntime
+  ansible.builtin.include_tasks: ops/install-one.yml
+  vars:
+    pkg:
+      name: javaruntime
+      version: "{{ choco_target_min_version_map[app_catalog_item.key] | default(acceptable_versions.applications.javaruntime.min_version) }}"
+      registry_patterns: "{{ app_catalog_item.registry_patterns | default(['^Java \\\\d+ Update', '^Java\\\\(TM\\\\) SE Runtime Environment']) }}"

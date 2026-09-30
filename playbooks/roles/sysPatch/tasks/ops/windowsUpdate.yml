@@ -1,0 +1,63 @@
+# ops/windowsUpdate.yml -- sysPatch
+#
+# Runbook step 2, delegated to the winUpdate role. sysPatch does not implement
+# Windows Update itself so the same logic serves hosts outside a maintenance
+# window. This file only translates sysPatch settings into winUpdate settings
+# and folds the result back into the sysPatch report.
+#
+# prestage downloads without installing, which is the whole point of staging
+# ahead of the window. patch and full install. Neither reboots here; the reboot
+# is a separate sysPatch phase so the operator keeps control of when the host
+# drops.
+
+- name: update | Delegate to the winUpdate role
+  ansible.builtin.include_role:
+    name: winUpdate
+  vars:
+    update: "{{ 'download' if (_sp_prestage | bool) else 'install' }}"
+    winupdate_categories: "{{ syspatch_update_categories }}"
+    winupdate_reject_list: "{{ syspatch_update_reject_list }}"
+    winupdate_timeout: "{{ syspatch_update_timeout }}"
+    winupdate_min_free_gb: "{{ syspatch_min_free_gb }}"
+    winupdate_report_dir_remote: "{{ syspatch_report_dir_remote }}"
+    # sysPatch owns the reboot and the report for the whole window.
+    winupdate_allow_reboot: false
+    winupdate_report_enabled: false
+
+- name: update | Fold the update result into the sysPatch report
+  ansible.builtin.set_fact:
+    sp_update_result: "{{ winupdate_result | default({}) }}"
+    sp_events: >-
+      {{
+        sp_events + [{
+          'phase': 'windows_update',
+          'action': (
+            'Downloaded' if (_sp_prestage | bool)
+            else ('Installed' if (winupdate_result.installed | default(0) | int) > 0 else 'NoChange')
+          ),
+          'result': ('error' if (winupdate_result.failed | default(0) | int) > 0 else 'ok'),
+          'detail': (
+            'source=' ~ (winupdate_result.source | default('unknown')) ~
+            ' found=' ~ (winupdate_result.found | default(0) | string) ~
+            ' downloaded=' ~ (winupdate_result.downloaded | default(0) | string) ~
+            ' installed=' ~ (winupdate_result.installed | default(0) | string) ~
+            ' failed=' ~ (winupdate_result.failed | default(0) | string)
+          )
+        }]
+      }}
+  changed_when: false
+
+- name: update | Record update errors
+  ansible.builtin.set_fact:
+    sp_errors: >-
+      {{
+        sp_errors + [{
+          'phase': 'windows_update',
+          'message': (
+            (winupdate_result.failed | default(0) | string) ~ ' update(s) failed. ' ~
+            (winupdate_result.message | default(''))
+          )
+        }]
+      }}
+  when: (winupdate_result.failed | default(0) | int) > 0
+  changed_when: false

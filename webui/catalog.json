@@ -1,0 +1,328 @@
+{
+  "_meta": {
+    "comment": "Hand-curated mirror of playbooks/roles/chocoDeploy/defaults/main.yml. When the role catalog changes, update this file too. The webui never executes ansible; it only assembles command strings.",
+    "role_defaults": "playbooks/roles/chocoDeploy/defaults/main.yml",
+    "quickref": "playbooks/roles/chocoDeploy/chocoDeploy_QuickRef.md"
+  },
+
+  "playbook": "playbooks/chocoDeploy.yml",
+  "vault_key": "vault/.vault_key.txt",
+
+  "step_descriptions": {
+    "target":   "Which inventory file the play loads (-i) and the optional host or group pattern that narrows the run (-l). Either pick from the sidebar or type a path. The limit accepts a group name (basic_hosts), an exact hostname, or a wildcard pattern (test-host-01*).",
+    "mode":     "How chocoDeploy decides what to touch. Conversion converts what is already there. Update is the fast Chocolatey-only pass. Baseline enforces the full catalog. Report only re-renders the daily HTML from existing JSON without changing software.",
+    "apps":     "Controls the targetSoftware variable. Default uses the full managed catalog (apps flagged explicit-only are excluded). Filter runs only the apps you tick below. Skip skips the app pass entirely so the run is runtime-only.",
+    "removals": "Controls the removeSoftware variable. Default processes the full removal catalog. Filter removes only what you tick or what you list as ad-hoc package ids (any choco package id is accepted, not just catalog entries). Skip skips the removal pass entirely.",
+    "runtimes": "Runtime alignment is opt-in. Enable a runtime to add it to the run. Side-by-side runtimes (Python, modern .NET) use channel tracks; click a track chip to target it, or leave all unselected to auto-detect installed tracks based on the mode.",
+    "flags":    "Reboot policy, force-replace orphan escape hatches (for vendor uninstallers that leave registry keys), Chocolatey behavior toggles, parallelism, tags, and a free-form -e box for anything not covered above."
+  },
+
+  "modes": [
+    {
+      "key": "choco_conversion",
+      "label": "Conversion",
+      "blurb": "Convert detected vendor installs to Chocolatey ownership.",
+      "details": "Scans both the Chocolatey inventory and the Windows uninstall registry. Apps already present are upgraded to the approved version under Chocolatey management; vendor copies are removed in the process. No new applications are added. This is the routine alignment pass."
+    },
+    {
+      "key": "choco_update",
+      "label": "Update (fast)",
+      "blurb": "Only Chocolatey-visible managed apps are checked.",
+      "details": "Skips the uninstall-registry probe entirely. Use as a recurring fast compliance pass when you only want to upgrade choco-managed apps in place. Never installs missing apps or sweeps vendor installs (unless floor_required is set on a runtime)."
+    },
+    {
+      "key": "choco_baseline",
+      "label": "Baseline (full)",
+      "blurb": "Enforce the full approved catalog on the host.",
+      "details": "Runs every managed app task. Installs missing apps, converts vendor installs where found, and upgrades existing managed software. Use for provisioning a new host or full remediation. Heaviest mode."
+    },
+    {
+      "key": "choco_selective",
+      "label": "Selective (named apps)",
+      "blurb": "Install/align ONLY the apps you explicitly name, on existing nodes.",
+      "details": "Processes exactly the apps in targetSoftware and nothing else: installs them if missing (clean host), converts vendor/manual installs, and upgrades choco-owned copies -- all in one pass. Requires a non-empty targetSoftware list; there is no full-catalog fallback, so it cannot accidentally push the whole catalog. Use to add or update one specific app across already-deployed hosts (e.g. azure-cli)."
+    },
+    {
+      "key": "report_only",
+      "label": "Report only",
+      "blurb": "Re-render the daily HTML report from existing JSON files.",
+      "details": "Touches no software. Reads per-run JSON files from C:\\tools\\chocolog for the current UTC date and regenerates the consolidated daily HTML. Use to rebuild a report after deleting it, or after a template update."
+    }
+  ],
+
+  "apps_mode_options": [
+    { "key": "default", "label": "Default catalog",                       "desc": "Omit targetSoftware. Runs the full managed catalog (apps marked explicit-only such as Teams are skipped)." },
+    { "key": "filter",  "label": "Filter to selected apps below",         "desc": "Emits targetSoftware:[...] containing only the apps you tick. Aliases (7zip, vscode, teams) resolve to canonical package ids." },
+    { "key": "skip",    "label": "Skip apps entirely (runtime-only run)", "desc": "Emits targetSoftware:[]. The app pass is skipped completely. Use this with a runtime selection for a runtime-only run." }
+  ],
+  "rm_mode_options": [
+    { "key": "default", "label": "Default catalog",                "desc": "Omit removeSoftware. Processes the full removal catalog (currently Notepad++)." },
+    { "key": "filter",  "label": "Filter to selected entries",     "desc": "Emits removeSoftware:[...] with only the ticked entries plus any ad-hoc package ids you list below. Ad-hoc ids are removed by exact choco package name with no vendor-registry scan." },
+    { "key": "skip",    "label": "Skip removal entirely",          "desc": "Emits removeSoftware:[]. The removal pass is skipped completely." }
+  ],
+
+  "reboot_policies": [
+    { "key": "never",     "label": "never (default)",                       "desc": "No reboot after the run. This is the safe default for prod hosts." },
+    { "key": "if_needed", "label": "if_needed (reboot only when pending)",  "desc": "Reboots only when a pending reboot was detected (.NET Framework upgrade, deferred MSI cleanup, etc.). Reboot is logged to the Application event log first." },
+    { "key": "always",    "label": "always (reboot every host)",            "desc": "Reboots every host at the end of a successful run regardless of pending-reboot state. Almost never what you want on a live fleet." }
+  ],
+
+  "apps": [
+    {
+      "key": "docker-desktop",
+      "label": "Docker Desktop",
+      "alias": "docker-desktop",
+      "min_version": "4.64.0",
+      "install_size": "medium",
+      "requires_explicit_target": false,
+      "description": "Docker Desktop. Has both Windows services and user-session tray/helper processes; pre-remove script stops services and uses taskkill /F /T to reach all sessions before uninstall."
+    },
+    {
+      "key": "7zip.install",
+      "label": "7-Zip",
+      "alias": "7zip",
+      "min_version": "26.2.0",
+      "install_size": "small",
+      "requires_explicit_target": false,
+      "description": "7-Zip archive utility. Straightforward MSI; no special pre-remove handling required."
+    },
+    {
+      "key": "git",
+      "label": "Git",
+      "alias": "git",
+      "min_version": "2.55.0.3",
+      "install_size": "medium",
+      "requires_explicit_target": false,
+      "description": "Git for Windows. Routed to the internal repo when chocoInternalRepo includes it."
+    },
+    {
+      "key": "greenshot",
+      "label": "Greenshot",
+      "alias": "greenshot",
+      "min_version": "1.3.315",
+      "install_size": "small",
+      "requires_explicit_target": false,
+      "force_orphan_supported": true,
+      "description": "Greenshot screenshot tool (Inno Setup). Fragile: writes Publisher=Greenshot not Chocolatey, runs in user-session tray, and the Inno uninstaller can leave PendingFileRenameOperations. Supports greenshot_force_replace_orphan=true for stuck installs."
+    },
+    {
+      "key": "microsoft-teams-new-bootstrapper",
+      "label": "Microsoft Teams (bootstrapper)",
+      "alias": "teams",
+      "min_version": "1.0.2508703",
+      "install_size": "medium",
+      "requires_explicit_target": true,
+      "description": "Microsoft Teams machine-wide bootstrapper. The Teams client self-updates after provisioning. EXPLICIT-ONLY: skipped by the default catalog; you must add it to targetSoftware to manage it."
+    },
+    {
+      "key": "pycharm",
+      "label": "PyCharm",
+      "alias": "pycharm",
+      "min_version": "2026.1.4",
+      "install_size": "large",
+      "requires_explicit_target": false,
+      "description": "JetBrains PyCharm. Tagged install_size: large (45-minute Choco timeout, 50-minute task timeout). Pre-remove invokes JetBrains uninstaller with /S to dismiss the GUI."
+    },
+    {
+      "key": "putty.install",
+      "label": "PuTTY",
+      "alias": "putty",
+      "min_version": "0.83.0",
+      "install_size": "small",
+      "requires_explicit_target": false,
+      "description": "PuTTY SSH/telnet client. Detect also matches putty.portable so vendor zip installs are caught."
+    },
+    {
+      "key": "vim",
+      "label": "Vim",
+      "alias": "vim",
+      "min_version": "9.2.810",
+      "install_size": "small",
+      "requires_explicit_target": false,
+      "description": "Vim text editor. Pre-remove kills vim/gvim across all sessions to release file handles before uninstall."
+    },
+    {
+      "key": "vscode.install",
+      "label": "VS Code",
+      "alias": "vscode",
+      "min_version": "1.129.1",
+      "install_size": "medium",
+      "requires_explicit_target": false,
+      "description": "Visual Studio Code (system installer). Pre-remove runs only on a vendor-to-Chocolatey conversion; routine in-channel upgrades use state:latest with no kill."
+    },
+    {
+      "key": "winscp.install",
+      "label": "WinSCP",
+      "alias": "winscp",
+      "min_version": "6.5.5",
+      "install_size": "small",
+      "requires_explicit_target": false,
+      "force_orphan_supported": true,
+      "description": "WinSCP SFTP/SCP client (Inno Setup, like Greenshot). Supports winscp_install_force_replace_orphan=true when the uninstaller leaves the registry entry behind."
+    },
+    {
+      "key": "azure-cli",
+      "label": "Azure CLI",
+      "alias": "az",
+      "install_size": "medium",
+      "requires_explicit_target": true,
+      "description": "Microsoft Azure CLI. Explicit-target only: excluded from the default catalog pass, so it is installed or upgraded only when ticked under Filter or named in targetSoftware."
+    },
+    {
+      "key": "javaruntime",
+      "label": "Java Runtime (JRE)",
+      "alias": "jre",
+      "install_size": "medium",
+      "requires_explicit_target": false,
+      "description": "Oracle Java Runtime Environment. Vendor detection matches 'Java N Update' and 'Java(TM) SE Runtime Environment' registry entries."
+    },
+    {
+      "key": "nxlog",
+      "label": "NXLog CE",
+      "alias": "nxlog",
+      "install_size": "small",
+      "requires_explicit_target": false,
+      "description": "NXLog CE log-forwarding agent. The choco package wraps the vendor MSI, so the uninstall registry entry reads NXLog-CE / NXLog Ltd rather than Chocolatey. On a removal run pass --skip-tags nxlog, otherwise nxlogConfig.yml re-deploys the config and restarts the service."
+    }
+  ],
+
+  "removal_catalog": [
+    {
+      "key": "notepadplusplus",
+      "label": "Notepad++",
+      "alias": "notepad++",
+      "description": "Notepad++ text editor. Catalog entry with alias + registry-pattern-based vendor detection. Removes choco package and vendor install registry entries."
+    },
+    {
+      "key": "realvnc",
+      "label": "RealVNC",
+      "alias": "vnc",
+      "description": "RealVNC Viewer/Server. Blacklist entry: removed on every run where removeSoftware is unset. Detects the realvnc, vnc-viewer, and vnc-connect packages plus RealVNC/VNC Viewer/VNC Server registry entries."
+    }
+  ],
+
+  "runtimes": [
+    {
+      "key": "powershell_core",
+      "label": "PowerShell Core",
+      "min_version": "7.6.0",
+      "channels": null,
+      "role_defaults": {
+        "floor_required": true
+      },
+      "description": "PowerShell 7.x (pwsh). Single-track. FLEET DEFAULT (June 2026): min_version 7.6.0, floor_required=true in the role itself. Every targetRuntimes:[powershell_core] run brings the host to >= 7.6.x in any mode -- hosts with no pwsh get one installed; older versions upgraded in place. Known WinRM disconnect during the install is handled by the role's retry+verify path. Does not affect Windows PowerShell 5.1.",
+      "flags": [
+        { "key": "pwsh_audit_only",     "label": "Audit only (no changes)",
+          "desc": "Discovers and reports what would change but makes no changes. STRONGLY recommended for the first run on any inventory that has not been touched -- floor_required will install pwsh on hosts that have none." },
+        { "key": "pwsh_cleanup_vendor", "label": "Remove vendor PowerShell installs (default ON)",
+          "desc": "Removes non-Chocolatey PowerShell 7-x64 installs detected in the uninstall registry. Default true in the role. Set false to keep vendor MSIs alongside the choco install." }
+      ]
+    },
+    {
+      "key": "python",
+      "label": "Python",
+      "min_version": "3.13.14",
+      "channels": ["3.12", "3.13", "3.14"],
+      "default_min_supported_track": "3.12",
+      "role_defaults": {
+        "floor_required": true
+      },
+      "channel_min_versions": {
+        "3.12": "3.12.13",
+        "3.13": "3.13.14",
+        "3.14": "3.14.6"
+      },
+      "description": "CPython. Side-by-side capable: each major.minor track lives in its own Chocolatey package (python312, python313, python314). FLEET DEFAULT (June 2026): floor_required=true is set in the role itself, so every targetRuntimes:[python] run enforces the 3.12 floor -- below-floor installs (3.10/3.11) are removed and 3.12 installed in their place; hosts with no python get 3.12 installed; sweep runs even in choco_update mode. Adding floor_required:true here is redundant but harmless. To OPT OUT for a single run, set floor_required:false in the runtime override.",
+      "flags": [
+        { "key": "python_cleanup_vendor",  "label": "Remove vendor Python installs (matching aligned tracks)",
+          "desc": "After the choco install verifies, removes any non-Chocolatey python install for each aligned track from the uninstall registry. Off by default." },
+        { "key": "python_cleanup_aliases", "label": "Remove alias packages (python, python3)",
+          "desc": "Removes the generic 'python' and 'python3' meta-packages that pin to a moving track. Useful when migrating to explicit per-track packages." },
+        { "key": "python_audit_only",      "label": "Audit only (no changes)",
+          "desc": "Discovers and reports what would change but makes no changes. STRONGLY recommended for the first python run on any inventory that has not been touched -- the new floor_required default will install 3.12 on every host that has no python." }
+      ]
+    },
+    {
+      "key": "dotnet_runtime",
+      "label": ".NET Runtime (modern, side-by-side)",
+      "min_version": "10.0.1",
+      "channels": ["8.0", "9.0", "10.0"],
+      "default_min_supported_track": "8.0",
+      "channel_min_versions": {
+        "8.0":  "8.0.25",
+        "9.0":  "9.0.14",
+        "10.0": "10.0.1"
+      },
+      "description": "Modern .NET (6+). Side-by-side capable; each major.minor track ships as dotnet-<track>-aspnetruntime. SDKs, Targeting Packs, Host components, and Hosting Bundles are never touched by alignment or sweep.",
+      "flags": [
+        { "key": "dotnet_cleanup_vendor", "label": "Remove vendor .NET entries for aligned tracks",
+          "desc": "Removes vendor Runtime / ASP.NET Core / Windows Desktop Runtime entries from the uninstall registry whose major.minor matches an aligned track. Off by default." },
+        { "key": "dotnet_audit_only",    "label": "Audit only (no changes)",
+          "desc": "Discovers and reports what would change but makes no changes. Recommended for first runs of exclusive, floor_required, or cleanup_vendor." }
+      ]
+    },
+    {
+      "key": "dotnet_framework",
+      "label": ".NET Framework 4.8.1 (in-box; upgrade only)",
+      "min_version": "4.8.1.20250219",
+      "channels": null,
+      "description": "Legacy .NET Framework. Cannot be uninstalled, only upgraded in place. A reboot is required after a 4.8 -> 4.8.1 upgrade; the role records an advisory event and continues if the host already had a pending reboot.",
+      "flags": [
+        { "key": "dnfx_audit_only", "label": "Audit only (no changes)",
+          "desc": "Discovers and reports what would change but makes no changes." }
+      ]
+    }
+  ],
+
+  "runtime_per_target_options": {
+    "exclusive": {
+      "label": "exclusive (sweep tracks not in channels)",
+      "desc": "Enables the runtime sweep over channel mismatches. Out-of-policy tracks (both choco-managed and vendor) are removed. Recommend audit_only on the first run to preview removals."
+    },
+    "floor_required": {
+      "label": "floor_required (always install floor + sweep below)",
+      "desc": "Always adds the floor track (min_supported_track) to the alignment list and runs the sweep even in choco_update mode. Designed for mixed-fleet onboarding: hosts with no runtime get the floor installed; hosts on older tracks have them removed."
+    },
+    "min_supported_track": {
+      "label": "min_supported_track (e.g. 8.0)",
+      "desc": "Any installed track strictly less than this value is removed by the sweep regardless of exclusive mode. Set blank to disable the floor."
+    }
+  },
+
+  "force_orphan_flags": [
+    { "key": "greenshot_force_replace_orphan",
+      "label": "greenshot_force_replace_orphan",
+      "desc": "When the Greenshot uninstaller fails to clean its Inno Setup registry key, nukes the canonical Greenshot_is1 key plus residual Program Files dir, then lets Chocolatey install on a clean slate. User config under %APPDATA% is preserved." },
+    { "key": "winscp_install_force_replace_orphan",
+      "label": "winscp_install_force_replace_orphan",
+      "desc": "Same orphan-cleanup pattern as Greenshot, for WinSCP (also Inno Setup). Saved sessions and user config are preserved." }
+  ],
+
+  "common_flags": [
+    { "key": "choco_force_install",
+      "label": "choco_force_install=true",
+      "desc": "Force reinstall even when the same version is already present. Useful for troubleshooting a flaky install; adds overhead on every aligned package otherwise." },
+    { "key": "choco_ignore_checksums",
+      "label": "choco_ignore_checksums=true",
+      "desc": "Bypass package integrity checks during install. Default. Set false only when all packages are served from a signed internal repository." },
+    { "key": "choco_deploy_reset_daily",
+      "label": "choco_deploy_reset_daily=true",
+      "desc": "Delete today's JSON and HTML reports on the target host before writing the new run's report. Use after troubleshooting to clear accumulated bad data; the HTML report is rebuilt cleanly from the new run." },
+    { "key": "choco_deploy_skip_pending_reboot",
+      "label": "choco_deploy_skip_pending_reboot=true",
+      "desc": "Hosts with a detected pending reboot skip the alignment pass and log an advisory. The host is added to the pending-reboot inventory file on the control node for a separate reboot pass." }
+  ],
+
+  "field_help": {
+    "inventory":    "Path to a YAML inventory under inventory/. Pick from the sidebar to set it automatically.",
+    "limit":        "Optional. Group name, hostname, or wildcard. Examples: basic_hosts | test-host-01.corp.example.com | fleet-host-04-*",
+    "app_filter":   "Each ticked app becomes an entry in targetSoftware. Override the per-app minimum approved version on the right (leave blank to use the catalog default).",
+    "rm_adhoc":     "Comma- or newline-separated choco package ids. Removed by exact name without vendor-registry scanning; useful for one-off cleanups or reversing a mistaken deployment.",
+    "tracks":       "Click chips to target specific tracks. Leave all unselected to let the role auto-detect installed tracks (choco only in update mode; choco + vendor in conversion; all configured channels in baseline).",
+    "forks":        "Override the default fork count from ansible.cfg (25). Increase for fleet-wide runs; decrease for noisy hosts or bandwidth-constrained sites.",
+    "tags":         "Comma-separated Ansible tags. e.g. choco_init for prep-only (bootstrap Chocolatey without alignment).",
+    "extra_raw":    "Anything not covered above. One -e per line. Use plain VAR=VALUE syntax (no quotes); the builder wraps each line in -e \"...\"."
+  },
+
+  "forks_default": 25
+}

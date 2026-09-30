@@ -1,0 +1,96 @@
+# defaults/main.yml -- winUpdate role
+#
+# Windows Update alignment. The role scans for updates in the approved
+# categories, optionally installs them, and reports the outcome. It is the
+# Windows Update counterpart to chocoDeploy, which handles third-party
+# application alignment. The two do not overlap and can run in either order.
+#
+# Mode is selected on the CLI:
+#   --extra-vars "update=audit"
+#   --extra-vars "update=install"
+#   --extra-vars "update=install_reboot"
+
+# ---------------------------------------------------------------------------
+# Mode
+# ---------------------------------------------------------------------------
+# audit           read-only. Reports what would be installed and changes
+#                 nothing. This is the default so a bare run is always safe.
+# install         installs the matching updates. Does not reboot. A required
+#                 reboot is reported as an advisory.
+# install_reboot  installs, then reboots when the host says a reboot is
+#                 required. The reboot is separately gated. See below.
+update: "audit"
+
+# ---------------------------------------------------------------------------
+# Scope
+# ---------------------------------------------------------------------------
+# Categories handed to ansible.windows.win_updates. Trim the list to narrow a
+# window, for example to security content only on a production application
+# server, or widen it with 'Drivers' on a workstation image.
+#
+# Recognized values: Application, Connectors, CriticalUpdates, DefinitionUpdates,
+# DeveloperKits, Drivers, FeaturePacks, Guidance, ServicePacks, Tools,
+# UpdateRollups, Updates, SecurityUpdates.
+winupdate_categories:
+  - SecurityUpdates
+  - CriticalUpdates
+  - UpdateRollups
+  - Updates
+  - DefinitionUpdates
+
+# Drivers are deliberately absent from the default categories. On Dell server
+# hardware the vendor tool owns firmware and drivers, and letting both apply
+# them invites conflicts. Set this true only for hosts with no vendor tool.
+winupdate_include_drivers: false
+
+# KB articles to hold back, for example "KB5001234". Titles are matched as
+# regular expressions by win_updates, so a partial title also works.
+winupdate_reject_list: []
+
+# Restrict the run to specific updates. Empty means every update matching the
+# categories is in scope. Use this to apply one known KB and nothing else.
+winupdate_accept_list: []
+
+# Only install updates Microsoft does not mark as requiring user input.
+winupdate_skip_optional: true
+
+# ---------------------------------------------------------------------------
+# Reboot policy
+# ---------------------------------------------------------------------------
+# A reboot needs BOTH gates. The host must appear in the allow list AND the
+# operator must pass the flag. Two independent gates mean an inventory mistake
+# cannot bounce a production box.
+#   -e "winupdate_allow_reboot=true"
+winupdate_allow_reboot: false
+
+# Short names, matched against inventory_hostname_short. Empty blocks every
+# reboot. Add a host only after its owner has authorized restarts.
+winupdate_reboot_allowed_hosts: []
+
+winupdate_reboot_timeout: 1800
+winupdate_post_reboot_settle_seconds: 120
+
+# ---------------------------------------------------------------------------
+# Execution
+# ---------------------------------------------------------------------------
+# A server that has not been patched in months can run long. This caps the
+# WinRM wall clock per host, not the number of updates.
+winupdate_timeout: 7200
+
+# Free space on C: required before installing. Windows Update needs headroom,
+# and a disk that fills mid-install is the worst failure mode available.
+# Set to 0 to skip the check.
+winupdate_min_free_gb: 15
+
+# How many entries of installed update history to read back for the report.
+# Set to 0 to skip the history read.
+winupdate_history_count: 25
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+# Set false when another role includes this one and owns the report. sysPatch
+# does exactly that, so the maintenance window produces one report, not two.
+winupdate_report_enabled: true
+winupdate_report_dir_remote: 'C:\tools\patchlog'
+winupdate_report_dir_local: "{{ chocofleet_data_root }}/LOGS/winUpdate"

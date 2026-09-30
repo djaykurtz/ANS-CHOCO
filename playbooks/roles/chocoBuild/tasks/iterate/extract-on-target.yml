@@ -1,0 +1,107 @@
+---
+# tasks/iterate/extract-on-target.yml
+#
+# Unzip a staged .nupkg on a TEST host into a working directory so the
+# operator (or a follow-up task) can edit chocolateyinstall.ps1, rename
+# files in tools/files/, swap binaries, etc.
+#
+# Required vars:
+#   iter_target    - hostname; the play that includes this should already
+#                    be running against that host
+#   iter_package   - chocolatey package id (e.g. 'docker-desktop')
+#   iter_version   - exact version string (e.g. '4.76.1')
+#
+# Optional vars (from defaults/main.yml):
+#   chocoBuild_iterate_workdir   - root for extracted workdirs
+#   chocoBuild_iterate_stage_dir - dir on target containing the .nupkg
+#
+# Output:
+#   Contents of the .nupkg are unzipped to:
+#     <chocoBuild_iterate_workdir>\<iter_package>\<iter_version>\
+#   That dir is wiped first if it already exists, so each extract
+#   produces a clean working state.
+
+- name: chocoBuild iterate_extract | Validate inputs
+  ansible.builtin.assert:
+    that:
+      - iter_package | default('') | length > 0
+      - iter_version | default('') | length > 0
+    fail_msg: >-
+      iterate_extract requires iter_package and iter_version (e.g.
+      -e "iter_package=docker-desktop iter_version=4.76.1")
+
+- name: chocoBuild iterate_extract | Compute paths
+  ansible.builtin.set_fact:
+    _iter_src_nupkg: "{{ chocoBuild_iterate_stage_dir }}\\{{ iter_package }}.{{ iter_version }}.nupkg"
+    _iter_workdir:   "{{ chocoBuild_iterate_workdir }}\\{{ iter_package }}\\{{ iter_version }}"
+
+- name: chocoBuild iterate_extract | Verify source .nupkg exists on target
+  ansible.windows.win_stat:
+    path: "{{ _iter_src_nupkg }}"
+  register: _iter_src_stat
+
+- name: chocoBuild iterate_extract | Fail if source missing
+  ansible.builtin.fail:
+    msg: >-
+      iterate_extract: source nupkg not found at {{ _iter_src_nupkg }}.
+      Copy the .nupkg there first (out-of-band - the iterate workflow
+      does not stage files from the mirror, only operates in place).
+  when: not _iter_src_stat.stat.exists
+
+- name: chocoBuild iterate_extract | Wipe any prior workdir for this version
+  ansible.windows.win_file:
+    path: "{{ _iter_workdir }}"
+    state: absent
+
+- name: chocoBuild iterate_extract | Ensure workdir parent exists
+  ansible.windows.win_file:
+    path: "{{ _iter_workdir }}"
+    state: directory
+
+- name: chocoBuild iterate_extract | Unzip .nupkg into workdir
+  ansible.windows.win_shell: |
+    # win_unzip refuses .nupkg as a "non-zip" extension and demands PSCX.
+    # But .nupkg IS just a zip (OPC). Use the .NET ZipFile API directly -
+    # same pattern internalize-package.ps1 uses.
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::ExtractToDirectory(
+      '{{ _iter_src_nupkg }}',
+      '{{ _iter_workdir }}'
+    )
+    "EXTRACTED $(((Get-ChildItem -Path '{{ _iter_workdir }}' -Recurse -File).Count)) files"
+  args:
+    creates: "{{ _iter_workdir }}\\{{ iter_package }}.nuspec"
+  register: _iter_extract_result
+  changed_when: _iter_extract_result.stdout | trim | regex_search('^EXTRACTED')
+
+- name: chocoBuild iterate_extract | Inventory unzipped contents
+  ansible.windows.win_shell: |
+    $w = '{{ _iter_workdir }}'
+    Get-ChildItem -Path $w -Recurse -File |
+      Select-Object @{N='Path';E={ $_.FullName.Substring($w.Length + 1) }},
+                    @{N='SizeMB';E={ [math]::Round($_.Length / 1MB, 2) }} |
+      ConvertTo-Json -Compress
+  register: _iter_inventory
+  changed_when: false
+
+- name: chocoBuild iterate_extract | Show unzipped contents
+  ansible.builtin.debug:
+    msg:
+      - "Extracted to: {{ _iter_workdir }}"
+      - "{{ _iter_inventory.stdout | trim | from_json }}"
+
+- name: chocoBuild iterate_extract | Show install script for inspection
+  ansible.windows.win_shell: |
+    $p = Join-Path '{{ _iter_workdir }}' 'tools\chocolateyinstall.ps1'
+    if (Test-Path -LiteralPath $p) {
+      Get-Content -Raw -LiteralPath $p
+    } else {
+      "(no chocolateyinstall.ps1 found at $p)"
+    }
+  register: _iter_install_script
+  changed_when: false
+
+- name: chocoBuild iterate_extract | Display install script
+  ansible.builtin.debug:
+    msg: "{{ _iter_install_script.stdout_lines }}"

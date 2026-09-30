@@ -1,0 +1,23 @@
+
+---
+# apps/chocoInventory.yml
+# One-time per-host choco inventory. Produces choco_installed_map {name: version}
+
+- name: chocoInventory | Query Chocolatey inventory
+  ansible.windows.win_command: >
+    choco list --local-only --limit-output
+  register: choco_inventory_raw
+  changed_when: false
+  failed_when: false
+
+- name: chocoInventory | Build package version map
+  ansible.builtin.set_fact:
+    choco_installed_map: >-
+      {{
+        dict(
+          choco_inventory_raw.stdout_lines | default([])
+          | map('trim') | select('ne', '') | list
+          | map('split', '|') | list
+        )
+      }}
+  changed_when: false

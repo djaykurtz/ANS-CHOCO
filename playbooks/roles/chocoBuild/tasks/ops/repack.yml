@@ -1,0 +1,7 @@
+---
+# Phase 4 placeholder - shared op: repack a workdir into .nupkg using
+# the ZipArchive forward-slash trick. Used by both source/community.yml
+# and source/wrapper.yml.
+- name: chocoBuild ops/repack | NOT YET IMPLEMENTED (Phase 4)
+  ansible.builtin.fail:
+    msg: "ops/repack.yml is a Phase 4 stub."

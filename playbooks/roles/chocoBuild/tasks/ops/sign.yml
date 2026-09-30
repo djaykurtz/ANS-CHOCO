@@ -1,0 +1,6 @@
+---
+# Future placeholder - Authenticode-sign a produced .nupkg using the
+# certificate identified by chocoBuild_signing_cert_thumbprint.
+- name: chocoBuild ops/sign | NOT YET IMPLEMENTED (future)
+  ansible.builtin.fail:
+    msg: "ops/sign.yml is a future stub."

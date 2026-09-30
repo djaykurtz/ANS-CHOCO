@@ -1,0 +1,9 @@
+---
+# Single source for every runtime path outside the repo:
+#   <root>/incoming/<campaign-id>/  campaign store and AD evidence
+#   <root>/LOGS/<area>/             run reports
+# Override per shell: export CHOCO_FLEET_DATA_ROOT=/some/other/root
+# Playbooks in playbooks/tools/ load this file through vars_files.
+chocofleet_data_root: >-
+  {{ lookup('ansible.builtin.env', 'CHOCO_FLEET_DATA_ROOT')
+     | default('/opt/ansible', true) }}

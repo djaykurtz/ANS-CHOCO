@@ -1,0 +1,10 @@
+---
+# Apply always-remove policy before normal alignment.
+
+- name: removeAlways | Run blacklist removals
+  ansible.builtin.include_tasks: remove-one.yml
+  loop: "{{ choco_selected_remove_items | default([]) }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    remove_item: "{{ item }}"

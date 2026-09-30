@@ -1,0 +1,61 @@
+---
+# playbooks/chocoBuild.yml
+#
+# Mirror-host build operations for the chocoBuild role.
+# Select an operation via --tags. Available: community, wrapper.
+#
+# Operator docs:
+#   docs/build/chocoBuild_QuickRef.md   (run patterns)
+#   docs/build/chocoBuild_Guide.md      (architecture + trust model)
+# For the test-host iterate loop, use playbooks/chocoBuild-iterate.yml.
+
+- name: chocoBuild | mirror operations
+  hosts: basic_hosts
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/catalogs/chocolatey_packages.yml"
+    - "{{ playbook_dir }}/../vault/corp-ans-secret.yml"
+
+  vars:
+    # ---- community-internalize defaults ----
+    choco_internalize_dir: 'C:\tools\chocoRepo'
+    choco_internalize_feed: 'https://community.chocolatey.org/api/v2/package'
+    choco_internalize_force: false
+    choco_internalize_skip_bundle: false
+    # ---- wrapper-synth defaults ----
+    wrapper_force: false
+
+  tasks:
+
+    # =========================================================
+    # community internalize
+    # =========================================================
+    - name: chocoBuild community | Load internalize spec
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/roles/chocoBuild/files/internalize-spec.yml"
+      tags: [never, community]
+
+    - name: chocoBuild community | Run source/community.yml
+      ansible.builtin.include_role:
+        name: chocoBuild
+        tasks_from: source/community.yml
+        apply:
+          tags: [never, community]
+      tags: [never, community]
+
+    # =========================================================
+    # wrapper synthesis (spec-driven, multi-package)
+    # =========================================================
+    - name: chocoBuild wrapper | Load wrapper spec
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/roles/chocoBuild/files/wrapper-spec.yml"
+      tags: [never, wrapper]
+
+    - name: chocoBuild wrapper | Run source/wrapper.yml
+      ansible.builtin.include_role:
+        name: chocoBuild
+        tasks_from: source/wrapper.yml
+        apply:
+          tags: [never, wrapper]
+      tags: [never, wrapper]

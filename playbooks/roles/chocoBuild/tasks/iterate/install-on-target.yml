@@ -1,0 +1,66 @@
+---
+# tasks/iterate/install-on-target.yml
+#
+# Run choco install/upgrade against the locally-staged .nupkg by
+# delegating to the chocoDeploy role. This is intentionally a thin
+# wrapper - chocoDeploy is the single source of install truth (drift
+# detection, orphan handling, choco metadata reconciliation, per-host
+# JSON+HTML reporting). chocoBuild does NOT duplicate that logic.
+#
+# Required vars:
+#   iter_package, iter_version
+#
+# Optional vars (from defaults/main.yml):
+#   chocoBuild_iterate_stage_dir       - dir containing the .nupkg
+#   chocoBuild_install_deployment_mode - choco_update / choco_baseline / choco_conversion
+#
+# Per-app force-orphan flags (e.g. docker_desktop_force_replace_orphan)
+# can still be passed via `-e` and chocoDeploy will pick them up
+# normally; this task does not interfere with them.
+
+- name: chocoBuild iterate_install | Validate inputs
+  ansible.builtin.assert:
+    that:
+      - iter_package | default('') | length > 0
+      - iter_version | default('') | length > 0
+    fail_msg: >-
+      iterate_install requires iter_package and iter_version
+
+- name: chocoBuild iterate_install | Verify .nupkg present on target
+  ansible.windows.win_stat:
+    path: "{{ chocoBuild_iterate_stage_dir }}\\{{ iter_package }}.{{ iter_version }}.nupkg"
+  register: _iter_install_stat
+
+- name: chocoBuild iterate_install | Fail if .nupkg missing
+  ansible.builtin.fail:
+    msg: >-
+      iterate_install: nupkg not found at
+      {{ chocoBuild_iterate_stage_dir }}\{{ iter_package }}.{{ iter_version }}.nupkg.
+      Run iterate_extract -> edit -> iterate_repack first, or copy a
+      .nupkg into {{ chocoBuild_iterate_stage_dir }} out-of-band.
+  when: not _iter_install_stat.stat.exists
+
+- name: chocoBuild iterate_install | Delegate to chocoDeploy role
+  ansible.builtin.include_role:
+    name: chocoDeploy
+  vars:
+    # Mode is overridable; default choco_update matches the iterate use
+    # case (test host already has the package; we're upgrading/refreshing).
+    deployment: "{{ chocoBuild_install_deployment_mode }}"
+    # Scope to just this package; skip all runtime alignment.
+    targetSoftware:
+      - key: "{{ iter_package }}"
+        min_version: "{{ iter_version }}"
+    targetRuntimes: []
+    removeSoftware: []
+    # Point chocoDeploy at the local stage dir as a "trusted source".
+    # The name is per-run so we don't collide with the real internal
+    # repo registration. choco_auto_discover_internalized_apps is
+    # disabled so we don't probe the real Nexus for this iterate run.
+    # chocoInternalRepo forces the package id through the local source.
+    trusted_choco_source:
+      name: 'chocoBuild-iterate-local'
+      url: "{{ chocoBuild_iterate_stage_dir }}"
+      priority: 1
+    choco_auto_discover_internalized_apps: false
+    chocoInternalRepo: ["{{ iter_package }}"]

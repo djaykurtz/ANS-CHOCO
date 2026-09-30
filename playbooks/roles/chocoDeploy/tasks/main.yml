@@ -1,0 +1,249 @@
+# tasks/main.yml
+# -------------------------
+# Core Operational Engine
+# -------------------------
+
+- name: chocoDeploy | Validate deployment mode
+  ansible.builtin.assert:
+    that:
+      - deployment in ['choco_conversion', 'choco_update', 'choco_baseline', 'choco_selective', 'report_only']
+    fail_msg: >-
+      Unsupported deployment '{{ deployment }}'.
+      Supported values: choco_conversion, choco_update, choco_baseline, choco_selective, report_only
+    quiet: true
+
+- name: chocoDeploy | Enforce explicit targetSoftware for choco_selective
+  ansible.builtin.assert:
+    that:
+      - targetSoftware is not none
+      - (targetSoftware | length) > 0
+    fail_msg: >-
+      deployment=choco_selective requires an explicit, non-empty targetSoftware list
+      (e.g. -e '{"targetSoftware":["azure-cli"]}'). This mode installs/aligns ONLY the
+      named apps on existing nodes; it never falls back to the full catalog. Refusing
+      to run with targetSoftware={{ 'null' if targetSoftware is none else targetSoftware }}.
+    quiet: true
+  when: deployment == 'choco_selective'
+
+- name: chocoDeploy | Initialize report event list
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: []
+    choco_deploy_report_errors: []
+    choco_deploy_fatal_error: false
+    choco_deploy_fatal_message: ''
+    choco_deploy_failed_task_name: ''
+    choco_removal_occurred: false
+    choco_deploy_skipped_pending_reboot: false
+    init_reboot_status:
+      PendingReboot: false
+      Reasons: []
+
+- name: chocoDeploy | Run deployment workflow
+  block:
+    - name: chocoDeploy | Resolve target software selection
+      ansible.builtin.import_tasks: ops/targetSelection.yml
+      when: deployment != 'report_only'
+
+    - name: chocoDeploy | Resolve target runtime selection
+      ansible.builtin.import_tasks: ops/runtimeSelection.yml
+      when: deployment != 'report_only'
+
+    - name: chocoDeploy | Resolve always-remove selection
+      ansible.builtin.import_tasks: ops/removeSelection.yml
+      when: deployment != 'report_only'
+
+    # Initialize Chocolatey (first run only)
+    - name: Ops | Initialize Chocolatey
+      ansible.builtin.import_tasks: ops/initChoco.yml
+      when: deployment != 'report_only'
+
+    # Build the chocolatey installed map once
+    - name: Ops | Build Chocolatey inventory map
+      ansible.builtin.import_tasks: ops/chocoInventory.yml
+      when: deployment != 'report_only'
+
+    # Build the installed-program inventory once.
+    # NB: previously gated to conversion/baseline only, but install-one's
+    # orphan detector and version-drift compare both need this data
+    # regardless of mode. Without it, choco_update wrongly flags every
+    # catalog entry as a choco-orphan (lib says present, no registry
+    # match - because no registry was queried), which forces a re-align
+    # every run. Cost: ~1.5s per host. Saves 75s+ per host for
+    # already-aligned packages. Caught on docker-desktop June 9 2026.
+    - name: Ops | Build installed program inventory map
+      ansible.builtin.include_tasks: ops/systemInventory.yml
+      when:
+        - deployment != 'report_only'
+
+    - name: Ops | Detect managed app candidates
+      ansible.builtin.import_tasks: ops/detectManagedApps.yml
+      when: deployment != 'report_only'
+
+    - name: Ops | Check reboot status after inventory collection
+      ansible.builtin.import_tasks: ops/rebootStatus.yml
+      when: deployment != 'report_only'
+
+    - name: chocoDeploy | Skip alignment - pending reboot detected
+      ansible.builtin.set_fact:
+        choco_deploy_skipped_pending_reboot: true
+      when:
+        - deployment != 'report_only'
+        - choco_deploy_skip_pending_reboot | default(false) | bool
+        - init_reboot_status.Actionable | default(false) | bool
+      changed_when: false
+
+    - name: chocoDeploy | Apply always-remove policy
+      ansible.builtin.include_tasks: ops/removeAlways.yml
+      when:
+        - deployment != 'report_only'
+        - (choco_selected_remove_items | default([]) | length) > 0
+
+    - name: Ops | Refresh Chocolatey inventory map after removals
+      ansible.builtin.include_tasks: ops/chocoInventory.yml
+      when:
+        - deployment != 'report_only'
+        - choco_removal_occurred | default(false) | bool
+
+    - name: chocoDeploy | Choco Conversion Mode
+      ansible.builtin.include_tasks: ops/chocoConversion.yml
+      when:
+        - deployment == "choco_conversion"
+
+    - name: chocoDeploy | Choco Update Mode
+      ansible.builtin.include_tasks: ops/chocoOnly.yml
+      when:
+        - deployment == "choco_update"
+
+    - name: chocoDeploy | Choco Baseline Mode
+      ansible.builtin.include_tasks: ops/chocoBaseline.yml
+      when:
+        - deployment == "choco_baseline"
+
+    - name: chocoDeploy | Choco Selective Mode
+      ansible.builtin.include_tasks: ops/chocoSelective.yml
+      when:
+        - deployment == "choco_selective"
+
+    - name: chocoDeploy | Infra | Resolve Python tracks
+      ansible.builtin.include_tasks: infra/pythonResolve.yml
+      when:
+        - deployment != 'report_only'
+        - not (choco_deploy_skipped_pending_reboot | default(false) | bool)
+        - "'python' in (choco_selected_runtime_ids | default([]))"
+      tags: [infra, align, python]
+
+    - name: chocoDeploy | Infra | Align Python track
+      ansible.builtin.include_tasks: infra/pythonAlign.yml
+      loop: "{{ choco_python_tracks_to_align | default([]) }}"
+      loop_control:
+        loop_var: python_track_item
+        label: "python {{ python_track_item.track }}"
+      when:
+        - deployment != 'report_only'
+        - not (choco_deploy_skipped_pending_reboot | default(false) | bool)
+        - "'python' in (choco_selected_runtime_ids | default([]))"
+      tags: [infra, align, python]
+
+    - name: chocoDeploy | Infra | Sweep out-of-policy Python tracks
+      ansible.builtin.include_tasks: infra/pythonSweep.yml
+      when:
+        - deployment != 'report_only'
+        - not (choco_deploy_skipped_pending_reboot | default(false) | bool)
+        - "'python' in (choco_selected_runtime_ids | default([]))"
+        - (choco_python_exclusive | default(false) | bool) or ((choco_python_min_supported_track | default('') | length) > 0) or (choco_python_floor_required | default(false) | bool)
+      tags: [infra, align, python]
+
+    - name: chocoDeploy | Infra | Align PowerShell
+      ansible.builtin.include_tasks: infra/powershellAlign.yml
+      when:
+        - deployment != 'report_only'
+        - not (choco_deploy_skipped_pending_reboot | default(false) | bool)
+        - "'powershell_core' in (choco_selected_runtime_ids | default([]))"
+      tags: [infra, align, powershell]
+
+    - name: chocoDeploy | Infra | Resolve .NET runtime tracks
+      ansible.builtin.include_tasks: infra/dotnetResolve.yml
+      when:
+        - deployment != 'report_only'
+        - not (choco_deploy_skipped_pending_reboot | default(false) | bool)
+        - "'dotnet_runtime' in (choco_selected_runtime_ids | default([]))"
+      tags: [infra, align, dotnet]
+
+    - name: chocoDeploy | Infra | Align .NET runtime track
+      ansible.builtin.include_tasks: infra/dotnetAlign.yml
+      loop: "{{ choco_dotnet_tracks_to_align | default([]) }}"
+      loop_control:
+        loop_var: dotnet_track_item
+        label: "dotnet {{ dotnet_track_item.track }}"
+      when:
+        - deployment != 'report_only'
+        - not (choco_deploy_skipped_pending_reboot | default(false) | bool)
+        - "'dotnet_runtime' in (choco_selected_runtime_ids | default([]))"
+      tags: [infra, align, dotnet]
+
+    - name: chocoDeploy | Infra | Sweep out-of-policy .NET tracks
+      ansible.builtin.include_tasks: infra/dotnetSweep.yml
+      when:
+        - deployment != 'report_only'
+        - not (choco_deploy_skipped_pending_reboot | default(false) | bool)
+        - "'dotnet_runtime' in (choco_selected_runtime_ids | default([]))"
+        - (choco_dotnet_exclusive | default(false) | bool) or ((choco_dotnet_min_supported_track | default('') | length) > 0) or (choco_dotnet_floor_required | default(false) | bool)
+      tags: [infra, align, dotnet]
+
+    - name: chocoDeploy | Infra | Align .NET Framework 4.x
+      ansible.builtin.include_tasks: infra/dotnetFrameworkAlign.yml
+      when:
+        - deployment != 'report_only'
+        - not (choco_deploy_skipped_pending_reboot | default(false) | bool)
+        - "'dotnet_framework' in (choco_selected_runtime_ids | default([]))"
+      tags: [infra, align, dotnet_framework]
+
+    # One-off, not a generic post-install-config framework (see nxlogConfig.yml).
+    - name: chocoDeploy | Ops | Deploy nxlog config
+      ansible.builtin.include_tasks: ops/nxlogConfig.yml
+      when:
+        - deployment != 'report_only'
+        - not (choco_deploy_skipped_pending_reboot | default(false) | bool)
+      tags: [nxlog]
+  rescue:
+    - name: chocoDeploy | Capture fatal task context
+      ansible.builtin.set_fact:
+        choco_deploy_fatal_error: true
+        choco_deploy_failed_task_name: "{{ ansible_failed_task.name | default('unknown-task') }}"
+        choco_deploy_fatal_message: >-
+          {{
+            ansible_failed_result.msg
+            | default(ansible_failed_result.stderr)
+            | default(ansible_failed_result.stdout)
+            | default('Unhandled fatal error during chocoDeploy run')
+          }}
+        choco_deploy_report_errors: >-
+          {{
+            choco_deploy_report_errors + [
+              {
+                'software': 'run-initialization',
+                'operation': (ansible_failed_task.name | default('unknown-task')),
+                'message': (
+                  ansible_failed_result.msg
+                  | default(ansible_failed_result.stderr)
+                  | default(ansible_failed_result.stdout)
+                  | default('Unhandled fatal error during chocoDeploy run')
+                )
+              }
+            ]
+          }}
+      changed_when: false
+  always:
+    - name: chocoDeploy | Finalize report
+      ansible.builtin.import_tasks: ops/report.yml
+
+    - name: chocoDeploy | End-of-run reboot evaluation
+      ansible.builtin.include_tasks: ops/rebootHost.yml
+      when:
+        - not (choco_deploy_fatal_error | bool)
+        - deployment != 'report_only'
+
+    - name: chocoDeploy | Re-raise fatal error after report
+      ansible.builtin.fail:
+        msg: "{{ choco_deploy_failed_task_name }}: {{ choco_deploy_fatal_message }}"
+      when: choco_deploy_fatal_error | bool

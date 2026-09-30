@@ -1,0 +1,37 @@
+# playbooks/softwareUsage.yml
+#
+# Read Security event log EventID 4688 (process creation) on each target and
+# report which catalog applications were actually USED in the lookback window.
+# Read-only role: no software changes, no reboots.
+#
+# Common runs (mirrors the chocoDeploy QuickRef shape):
+#
+#   # Default 30-day scan, threshold "ran at least twice", inv-TEST-solo
+#   ansible-playbook playbooks/softwareUsage.yml \
+#     -i inventory/TEST/inv-TEST-solo.yml \
+#     --vault-password-file=vault/.vault_key.txt
+#
+#   # 7-day scan
+#   ansible-playbook playbooks/softwareUsage.yml \
+#     -i inventory/TEST/inv-TEST-solo.yml \
+#     --vault-password-file=vault/.vault_key.txt \
+#     -e "usage_days=7"
+#
+#   # "Used at all" (threshold 1)
+#   ansible-playbook playbooks/softwareUsage.yml \
+#     -i /opt/ansible/incoming/<campaign-id>/inv-greenshot.yml \
+#     --vault-password-file=vault/.vault_key.txt \
+#     -e "usage_min_executions=1"
+#
+# After a run, build the fleet HTML roll-up:
+#   python3.12 playbooks/roles/softwareUsage/files/fleet_summary.py --last-hours 24
+---
+- name: softwareUsage -- detect actual software usage from Security 4688 events
+  hosts: basic_hosts
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../vault/corp-ans-secret.yml"
+
+  roles:
+    - softwareUsage

@@ -1,0 +1,38 @@
+---
+# Choco selective mode:
+# Install and/or align ONLY the explicitly-named target apps on existing
+# nodes. This is the safe answer to "add or update one specific app across
+# a set of already-deployed hosts" without the full-catalog risk of
+# choco_baseline.
+#
+# Contract (enforced in main.yml):
+#   - Requires a non-empty targetSoftware list. targetSoftware null/[] is a
+#     hard error. There is NO full-catalog fallback -- the mode literally
+#     cannot install anything the operator did not name.
+#
+# Behavior vs. the other modes (per-node, decided by install-one):
+#   - clean host (app absent)      -> install net-new  (baseline can, but
+#                                     conversion/update CANNOT)
+#   - vendor/manual install present -> convert to Chocolatey ownership
+#   - Chocolatey-owned install      -> upgrade to approved version
+#
+# This is exactly the mix needed to both seed missing installs AND update
+# the manual/vendor installs on the same run.
+#
+# detectManagedApps.yml has already populated detected_managed_apps with the
+# explicitly-named apps for this mode.
+
+- name: Choco Selective | Debug target list
+  ansible.builtin.debug:
+    msg: >-
+      Choco selective mode targeting these explicitly-named apps:
+      {{ detected_managed_apps | map(attribute='key') | list }}
+  when: choco_deploy_console_verbose | default(false) | bool
+
+- name: Choco Selective | Run app-specific alignment for named apps
+  ansible.builtin.include_tasks: "{{ item.task_file }}"
+  loop: "{{ detected_managed_apps }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    app_catalog_item: "{{ item }}"

@@ -1,0 +1,434 @@
+---
+# infra/powershellAlign.yml
+# Align PowerShell Core under Chocolatey ownership and pin to a known version.
+# Runtime alignment is opt-in through targetRuntimes.
+# In choco_conversion, only align when PowerShell is already present.
+# In choco_update, only align when Chocolatey already owns the runtime.
+# In choco_baseline, install or align the targeted runtime.
+
+- name: pwshAlign | Set alignment variables
+  ansible.builtin.set_fact:
+    pwsh_pkg: >-
+      {{
+        pwsh_pkg
+        | default((choco_target_runtime_map.powershell_core | default({})).package_name, true)
+        | default(acceptable_versions.runtimes.powershell_core.package_name, true)
+        | default((managed_runtimes | default({})).powershell_core.package_name, true)
+      }}
+    pwsh_version: >-
+      {{
+        pwsh_version
+        | default((choco_target_runtime_map.powershell_core | default({})).min_version, true)
+        | default(acceptable_versions.runtimes.powershell_core.min_version, true)
+        | default((managed_runtimes | default({})).powershell_core.min_version, true)
+      }}
+    pwsh_cleanup_vendor: "{{ pwsh_cleanup_vendor | default(true) | bool }}"
+    pwsh_audit_only: "{{ pwsh_audit_only | default(false) | bool }}"
+    pwsh_floor_required: >-
+      {{
+        ((choco_target_runtime_map.powershell_core | default({})).floor_required
+         | default(acceptable_versions.runtimes.powershell_core.floor_required | default(false)))
+        | bool
+      }}
+    pwsh_source_name: >-
+      {{
+        trusted_choco_source.name
+        if (pwsh_pkg in (choco_internalized_package_ids | default(chocoInternalRepo | default([]))))
+        else (
+          (choco_public_source_effective | default(choco_public_source_name | default('chocolatey')))
+          if (choco_explicit_source_routing | default(true) | bool)
+          else ''
+        )
+      }}
+  changed_when: false
+
+- name: pwshAlign | Validate requested version policy
+  ansible.builtin.assert:
+    that:
+      - pwsh_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+    fail_msg: >-
+      pwshAlign: acceptable_versions.runtimes.powershell_core.min_version must be a full semantic version.
+      Got {{ pwsh_version }}
+    quiet: true
+  changed_when: false
+
+- name: pwshAlign | Read package presence from inventory map
+  ansible.builtin.set_fact:
+    pwsh_choco_present: "{{ choco_installed_map[pwsh_pkg] is defined }}"
+    pwsh_choco_version: "{{ choco_installed_map[pwsh_pkg] | default('') }}"
+  changed_when: false
+
+- name: pwshAlign | Determine if Chocolatey already owns the desired version
+  ansible.builtin.set_fact:
+    pwsh_choco_ok: "{{ pwsh_choco_present and (pwsh_choco_version is version(pwsh_version, '>=')) }}"
+  changed_when: false
+
+- name: pwshAlign | Discover non-Chocolatey PowerShell installs
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $hits = @()
+    $paths = @(
+      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    $seenCodes = @{}
+
+    foreach ($p in $paths) {
+      Get-ItemProperty $p |
+        Where-Object {
+          $_.DisplayName -match 'PowerShell 7' -and
+          $_.Publisher -notmatch 'Chocolatey'
+        } |
+        ForEach-Object {
+          $hits += [pscustomobject]@{
+            DisplayName     = $_.DisplayName
+            DisplayVersion  = $_.DisplayVersion
+            UninstallString = $_.UninstallString
+            QuietUninstall  = $_.QuietUninstallString
+            ProductCode     = $_.PSChildName
+          }
+          $seenCodes[$_.PSChildName] = $true
+        }
+    }
+
+    # Fall back to the Windows Installer database directly (Win32_Product)
+    # for orphaned product registrations that have no visible Uninstall
+    # registry entry - the LaunchConditions check inside an MSI package
+    # still honors these even when Add/Remove Programs shows nothing.
+    # Confirmed real-world case 2026-08-18: choco reported powershell-core
+    # 7.6.0/7.6.2 while Win32_Product showed the real registered product was
+    # 7.6.5, with zero matching Uninstall registry keys for either version.
+    Get-CimInstance -ClassName Win32_Product -Filter 'Name LIKE ''PowerShell 7%''' |
+      ForEach-Object {
+        $code = $_.IdentifyingNumber
+        if (-not $seenCodes.ContainsKey($code)) {
+          $hits += [pscustomobject]@{
+            DisplayName     = $_.Name
+            DisplayVersion  = $_.Version
+            UninstallString = $null
+            QuietUninstall  = $null
+            ProductCode     = $code
+          }
+        }
+      }
+
+    $hits | ConvertTo-Json -Compress
+  register: pwsh_vendor_raw
+  # Always run this, even when Chocolatey already believes it owns the
+  # package (pwsh_choco_present=true). Chocolatey own local package
+  # bookkeeping can drift from the actual Windows Installer state (e.g. a
+  # prior Chocolatey-driven install that itself got interrupted by a WinRM
+  # disconnect, or a vendor/manual install layered on top afterward).
+  # Cross-checking the real registered product version here is the only way
+  # to catch that drift before trusting choco version number blindly.
+  # Confirmed real-world case 2026-08-18: choco reported powershell-core
+  # 7.6.0/7.6.2 while the actual registered product was 7.6.5 - without this
+  # check the role would have kept trying (and failing) to force a
+  # same-version-or-lower MSI reinstall over an already-newer real install.
+  when: deployment == 'choco_conversion' or pwsh_cleanup_vendor | bool
+  changed_when: false
+  failed_when: false
+
+- name: pwshAlign | Parse vendor inventory results
+  ansible.builtin.set_fact:
+    pwsh_vendor_list: >-
+      {%- set raw = pwsh_vendor_raw.stdout | default('') | trim -%}
+      {%- if raw | length == 0 -%}
+        []
+      {%- else -%}
+        {%- set parsed = raw | from_json -%}
+        {%- if parsed is mapping -%}
+          {{ [parsed] }}
+        {%- else -%}
+          {{ parsed }}
+        {%- endif -%}
+      {%- endif -%}
+  when: deployment == 'choco_conversion' or pwsh_cleanup_vendor | bool
+  changed_when: false
+
+- name: pwshAlign | Determine runtime alignment scope
+  ansible.builtin.set_fact:
+    pwsh_vendor_present: "{{ (pwsh_vendor_list | default([]) | length) > 0 }}"
+    pwsh_should_align: >-
+      {{
+        (deployment == 'choco_baseline')
+        or ((deployment == 'choco_update') and pwsh_choco_present)
+        or ((deployment == 'choco_conversion') and (pwsh_choco_present or ((pwsh_vendor_list | default([]) | length) > 0)))
+        or (pwsh_floor_required | bool)
+      }}
+  changed_when: false
+
+- name: pwshAlign | Determine highest vendor PowerShell version present
+  ansible.builtin.set_fact:
+    pwsh_vendor_version: >-
+      {{
+        (pwsh_vendor_list | default([]) | map(attribute='DisplayVersion') | select('match', '^[0-9]+\.[0-9]+\.[0-9]+') | list | sort(attribute=None, reverse=True) | first | default(''))
+      }}
+  when: deployment == 'choco_conversion' or pwsh_cleanup_vendor | bool
+  changed_when: false
+
+# Vendor PowerShell may already meet or exceed the requested floor (e.g. the
+# Chocolatey feed lags the vendor release, or a newer vendor build was
+# manually installed). Removing and replacing it in that case is an
+# unintended downgrade. Only cleanup vendor + install via Chocolatey when the
+# vendor version is actually below the floor.
+- name: pwshAlign | Determine if vendor install already satisfies the floor
+  ansible.builtin.set_fact:
+    pwsh_vendor_ok: >-
+      {{
+        (pwsh_vendor_present | default(false))
+        and (pwsh_vendor_version | default('') | length > 0)
+        and (pwsh_vendor_version is version(pwsh_version, '>='))
+      }}
+  changed_when: false
+
+- name: pwshAlign | OK - vendor install already meets or exceeds floor
+  ansible.builtin.debug:
+    msg: >-
+      pwshAlign: OK - vendor PowerShell {{ pwsh_vendor_version }} already meets or exceeds
+      minimum {{ pwsh_version }}; leaving vendor install in place.
+  when:
+    - pwsh_vendor_ok | default(false)
+    - choco_deploy_console_verbose | default(false) | bool
+  changed_when: false
+
+- name: pwshAlign | Record vendor-already-sufficient audit event
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': 'NoChange',
+            'software': pwsh_pkg,
+            'previous_version': pwsh_vendor_version,
+            'new_version': pwsh_vendor_version,
+            'source': 'vendor',
+            'notes': 'Vendor PowerShell already at or above minimum ' ~ pwsh_version ~ '; left in place to avoid downgrade'
+          }
+        ]
+      }}
+  when: pwsh_vendor_ok | default(false)
+  changed_when: false
+
+- name: pwshAlign | Skip runtime - not present for requested deployment
+  ansible.builtin.debug:
+    msg: >-
+      pwshAlign: SKIP - runtime not present and deployment={{ deployment }} does not add new runtime installs.
+  when:
+    - not pwsh_should_align
+    - choco_deploy_console_verbose | default(false) | bool
+  changed_when: false
+
+- name: pwshAlign | OK - already aligned
+  ansible.builtin.debug:
+    msg: "pwshAlign: OK - Chocolatey owns {{ pwsh_pkg }} {{ pwsh_choco_version }} (min={{ pwsh_version }})"
+  when:
+    - pwsh_choco_ok
+    - choco_deploy_console_verbose | default(false) | bool
+  changed_when: false
+
+- name: pwshAlign | Record no-change audit event
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': 'NoChange',
+            'software': pwsh_pkg,
+            'previous_version': pwsh_choco_version,
+            'new_version': pwsh_choco_version,
+            'source': 'chocolatey',
+            'notes': 'Already aligned at or above minimum ' ~ pwsh_version
+          }
+        ]
+      }}
+  when: pwsh_choco_ok
+  changed_when: false
+
+- name: pwshAlign | Remove vendor PowerShell installs
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $itemsJson = @'
+    {{ pwsh_vendor_list | to_json }}
+    '@
+    $items = @()
+    if ($itemsJson.Trim()) {
+      $parsed = $itemsJson | ConvertFrom-Json
+      if ($parsed -is [System.Array]) {
+        $items = $parsed
+      } elseif ($null -ne $parsed) {
+        $items = @($parsed)
+      }
+    }
+
+    Stop-Process -Name pwsh -Force -ErrorAction SilentlyContinue
+
+    foreach ($i in $items) {
+      if ($i.ProductCode -match '^\{?[0-9A-Fa-f\-]{36}\}?$') {
+        $code = $i.ProductCode
+        if ($code -notmatch '^\{') { $code = '{' + $code + '}' }
+        Start-Process msiexec.exe -ArgumentList "/x $code /qn /norestart" -Wait
+        continue
+      }
+      if ($i.QuietUninstall) {
+        cmd.exe /c $i.QuietUninstall | Out-Null
+        continue
+      }
+      if ($i.UninstallString) {
+        cmd.exe /c $i.UninstallString | Out-Null
+      }
+    }
+
+    "RemovedCandidates=$($items.Count)"
+  register: pwsh_vendor_remove
+  when:
+    - pwsh_should_align
+    - not pwsh_choco_present
+    - not (pwsh_vendor_ok | default(false))
+    - pwsh_cleanup_vendor | bool
+    - not pwsh_audit_only | bool
+    - (pwsh_vendor_list | length) > 0
+  changed_when: true
+  failed_when: false
+
+- name: pwshAlign | Install/upgrade PowerShell Core via Chocolatey
+  # state=present + version=X is a NO-OP when Chocolatey already sees the
+  # package installed at any version (documented pitfall, re-learned the
+  # hard way 2026-08-18: a same-day edit briefly used state=present here,
+  # which skipped the install entirely on already-managed hosts). Must use
+  # state=latest whenever pwsh_choco_present is true so Chocolatey actually
+  # attempts the upgrade; state=present+version is only valid for a genuine
+  # fresh install. The pwsh install commonly disconnects the WinRM session
+  # mid-task (HTTP 400) because the WinRM service plugin chain includes the
+  # PowerShell engine and the in-place upgrade can momentarily yank file
+  # handles. We treat the install task as best-effort and let the
+  # post-install re-query + verify task below decide whether alignment
+  # actually succeeded.
+  chocolatey.chocolatey.win_chocolatey:
+    name: "{{ pwsh_pkg }}"
+    version: "{{ pwsh_version if (pwsh_version | length > 0 and not pwsh_choco_present) else omit }}"
+    source: "{{ pwsh_source_name if (pwsh_source_name | length > 0) else omit }}"
+    state: "{{ 'latest' if pwsh_choco_present else 'present' }}"
+    force: "{{ choco_force_install | default(true) | bool }}"
+    ignore_checksums: "{{ choco_ignore_checksums | default(true) | bool }}"
+    timeout: "{{ choco_deploy_install_timeout_medium | default(900) | int }}"
+  register: pwsh_install
+  # failed_when only re-evaluates a module's RETURNED result. The pwsh upgrade
+  # commonly disconnects WinRM mid-module (HTTP 400), raising a transport-level
+  # WinRMTransportError before any result is returned - which failed_when cannot
+  # override, so the task would go fatal (observed on a double-pwsh host
+  # June 15 2026). ignore_errors catches that transport failure too. The
+  # re-query (retries until rc==0) + the assert below are the real success gate,
+  # so swallowing the disconnect here is safe: a genuinely failed install is
+  # caught when verification cannot find the expected version.
+  failed_when: false
+  ignore_errors: true
+  when:
+    - pwsh_should_align
+    - not pwsh_choco_ok
+    - not (pwsh_vendor_ok | default(false))
+    - not pwsh_audit_only | bool
+
+- name: pwshAlign | Re-query Chocolatey to verify final version
+  ansible.windows.win_command: >
+    choco list --local-only --limit-output {{ pwsh_pkg }}
+  register: pwsh_verify
+  # Retry the query because WinRM may need a moment to recover after a
+  # disconnect during install.
+  retries: 6
+  delay: 5
+  until: pwsh_verify.rc == 0
+  changed_when: false
+  failed_when: false
+  when:
+    - pwsh_should_align
+    - not pwsh_choco_ok
+    - not (pwsh_vendor_ok | default(false))
+    - not pwsh_audit_only | bool
+
+- name: pwshAlign | Verify final state
+  ansible.builtin.assert:
+    that:
+      - (pwsh_verify.stdout | default('') | trim) is search('^' ~ pwsh_pkg ~ '\|' ~ pwsh_version ~ '$')
+    fail_msg: "pwshAlign: FAILED - expected {{ pwsh_pkg }}|{{ pwsh_version }}, got: {{ pwsh_verify.stdout | default('') | trim }}"
+    quiet: true
+  when:
+    - pwsh_should_align
+    - not pwsh_choco_ok
+    - not (pwsh_vendor_ok | default(false))
+    - not pwsh_audit_only | bool
+
+- name: pwshAlign | Record removed vendor PowerShell installs in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': 'Removed',
+            'software': (item.DisplayName | default('PowerShell vendor install')),
+            'previous_version': '',
+            'new_version': '',
+            'source': 'vendor',
+            'notes': 'PowerShell runtime conversion cleanup'
+          }
+        ]
+      }}
+  loop: "{{ pwsh_vendor_list | default([]) }}"
+  loop_control:
+    label: "{{ item.DisplayName | default('PowerShell vendor install') }}"
+  when:
+    - pwsh_vendor_remove is defined
+    - not (pwsh_vendor_remove.skipped | default(false))
+    - not pwsh_audit_only | bool
+  changed_when: false
+
+# NOTE: pwsh_vendor_ok bypasses removal entirely (see above), so this task's
+# `pwsh_vendor_remove is defined` guard already ensures it never fires when
+# the vendor install was left in place.
+
+- name: pwshAlign | Record PowerShell package change in report
+  ansible.builtin.set_fact:
+    choco_deploy_report_events: >-
+      {{
+        choco_deploy_report_events + [
+          {
+            'action': ('Converted' if ((pwsh_vendor_present | default(false)) and (not pwsh_choco_present)) else ('Upgraded' if pwsh_choco_present else 'Installed')),
+            'software': pwsh_pkg,
+            'previous_version': (pwsh_choco_version if pwsh_choco_present else ''),
+            'new_version': ((pwsh_verify.stdout | default('') | trim).split('|')[-1] | trim),
+            'source': 'chocolatey',
+            'notes': (
+              'PowerShell runtime converted to Chocolatey management'
+              if ((pwsh_vendor_present | default(false)) and (not pwsh_choco_present))
+              else 'PowerShell runtime alignment'
+            )
+          }
+        ]
+      }}
+  # Gate on EITHER a normal changed result OR a transport-level failure on the
+  # install task. The pwsh upgrade routinely disconnects WinRM (HTTP 400) so the
+  # module returns no result and `changed` is never set even though the install
+  # actually happened. `ignore_errors` leaves `pwsh_install.failed=true` in that
+  # case. The assert above has already confirmed the expected version is present
+  # before we reach here, so recording the event is safe in both cases. Without
+  # this, hosts that hit the 400 silently dropped their Converted/Installed event
+  # from the distributed report (observed fleet-host-03 June 16 2026).
+  when:
+    - pwsh_should_align
+    - not pwsh_choco_ok
+    - not (pwsh_vendor_ok | default(false))
+    - not pwsh_audit_only | bool
+    - (pwsh_install.changed | default(false)) or (pwsh_install.failed | default(false))
+  changed_when: false
+
+- name: pwshAlign | Summary
+  ansible.builtin.debug:
+    msg: >-
+      pwshAlign summary: should_align={{ pwsh_should_align }},
+      ok_pre={{ pwsh_choco_ok }},
+      vendor_present={{ pwsh_vendor_present | default(false) }},
+      vendor_candidates={{ (pwsh_vendor_list | default([])) | length }},
+      vendor_removed={{ pwsh_vendor_remove is defined }},
+      choco_changed={{ pwsh_install.changed | default(false) }}
+  when: choco_deploy_console_verbose | default(false) | bool
+  changed_when: false

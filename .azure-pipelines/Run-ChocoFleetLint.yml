@@ -1,0 +1,20 @@
+# Manual Azure DevOps validation sample. GitHub uses .github/workflows/validate.yml.
+trigger: none
+pr: none
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.12'
+
+  - script: python -m pip install -r requirements-dev.txt
+    displayName: Install offline validation dependency
+
+  - script: python -m unittest discover -s playbooks/tools/tests -p 'test_*.py'
+    displayName: Python regression tests
+
+  - script: python playbooks/tools/validate_catalog.py
+    displayName: Catalog consistency

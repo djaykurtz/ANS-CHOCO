@@ -1,0 +1,244 @@
+---
+# infra/pythonResolve.yml
+# Determine which Python tracks to align for this run.
+# Produces choco_python_tracks_to_align - a list of dicts each with:
+#   track, min_version, pkg
+#
+# Track resolution order:
+#   1. Explicit tracks/track from targetRuntimes override
+#   2. Auto-detect based on deployment mode:
+#      - baseline: all tracks defined in channels config
+#      - conversion: tracks found in choco inventory + vendor python installs
+#      - update: tracks found in choco inventory only
+#   3. Only tracks with a configured channel min_version are processed.
+#
+# Legacy fallback: when acceptable_versions.runtimes.python.channels is empty
+# or absent, the package_name/min_version pair is used as a single track
+# derived from the package name (e.g. python313 -> 3.13).
+
+- name: pythonResolve | Determine channels and explicit overrides
+  ansible.builtin.set_fact:
+    _python_channels: >-
+      {{
+        (acceptable_versions.runtimes.python.channels | default({}))
+        if (acceptable_versions.runtimes.python.channels | default({}) | length) > 0
+        else (
+          {
+            (
+              (acceptable_versions.runtimes.python.package_name | default('python313'))
+              | regex_replace('^python', '')
+              | regex_replace('^([0-9])([0-9]+)$', '\\1.\\2')
+            ): {
+              'package_name': acceptable_versions.runtimes.python.package_name | default('python313'),
+              'min_version': acceptable_versions.runtimes.python.min_version | default('')
+            }
+          }
+        )
+      }}
+    _python_explicit_tracks: >-
+      {%- set rt = choco_target_runtime_map.python | default({}) -%}
+      {%- if rt.tracks is defined and (rt.tracks | length) > 0 -%}
+        {{ rt.tracks }}
+      {%- elif rt.track is defined and (rt.track | length) > 0 -%}
+        {{ [rt.track] }}
+      {%- else -%}
+        []
+      {%- endif -%}
+    _python_override_min: "{{ (choco_target_runtime_map.python | default({})).min_version | default('') }}"
+    _python_override_pkg: "{{ (choco_target_runtime_map.python | default({})).package_name | default('') }}"
+  changed_when: false
+
+- name: pythonResolve | Detect tracks from Chocolatey inventory
+  ansible.builtin.set_fact:
+    _python_choco_tracks: >-
+      {%- set found = [] -%}
+      {%- for key in choco_installed_map.keys() -%}
+        {%- set m = key | regex_search('^python([0-9])([0-9]+)$') -%}
+        {%- if m -%}
+          {%- set major = key | regex_replace('^python([0-9])([0-9]+)$', '\\1') -%}
+          {%- set minor = key | regex_replace('^python([0-9])([0-9]+)$', '\\2') -%}
+          {%- set _ = found.append(major ~ '.' ~ minor) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ found | unique | sort }}
+  when: (_python_explicit_tracks | length) == 0
+  changed_when: false
+
+- name: pythonResolve | Detect vendor Python tracks
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $tracks = @()
+    $paths = @(
+      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    foreach ($p in $paths) {
+      Get-ItemProperty $p |
+        Where-Object {
+          $_.DisplayName -match '^Python\s+(\d+)\.(\d+)' -and
+          $_.Publisher -notmatch 'Chocolatey'
+        } |
+        ForEach-Object {
+          if ($_.DisplayName -match '^Python\s+(\d+)\.(\d+)') {
+            $tracks += "$($Matches[1]).$($Matches[2])"
+          }
+        }
+    }
+    $unique = @($tracks | Sort-Object -Unique)
+    $parts = @(); foreach ($t in $unique) { $parts += "`"$t`"" }
+    '[' + ($parts -join ',') + ']'
+  register: _python_vendor_probe
+  changed_when: false
+  failed_when: false
+  when:
+    - (_python_explicit_tracks | length) == 0
+    - deployment == 'choco_conversion'
+
+- name: pythonResolve | Parse vendor tracks
+  ansible.builtin.set_fact:
+    _python_vendor_tracks: >-
+      {{
+        (_python_vendor_probe.stdout | default('[]') | trim | from_json)
+        if (_python_vendor_probe.stdout | default('') | trim | length > 0)
+        else []
+      }}
+  when:
+    - (_python_explicit_tracks | length) == 0
+    - deployment == 'choco_conversion'
+  changed_when: false
+
+# ---------------------------------------------------------------------------
+# Per-user Python discovery (HKEY_USERS scan)
+#
+# READ-ONLY. Does not affect alignment or sweep decisions. Records what was
+# found per loaded user hive so the per-run JSON + HTML report can surface
+# per-user Python installs that the HKLM sweep would otherwise miss.
+#
+# Operator decision (June 3 2026): keep this as advisory only -- per-user
+# Python removal requires explicit follow-up since uninstalling from the
+# admin context can leave user-scope MSI state inconsistent.
+#
+# Cost: ~0.5-1s on a typical host, ~2-5s on a multi-session Terminal
+# Services host with many loaded user hives.
+# ---------------------------------------------------------------------------
+
+- name: pythonResolve | Upload per-user Python discovery script
+  ansible.windows.win_copy:
+    src: discover_python_hku.ps1
+    dest: 'C:\Windows\Temp\discover_python_hku.ps1'
+  changed_when: false
+
+- name: pythonResolve | Discover per-user Python via HKEY_USERS scan
+  ansible.windows.win_shell: '& "C:\Windows\Temp\discover_python_hku.ps1"'
+  register: _python_hku_probe
+  changed_when: false
+  failed_when: false
+
+- name: pythonResolve | Parse per-user Python findings
+  ansible.builtin.set_fact:
+    choco_python_hku: >-
+      {{
+        (_python_hku_probe.stdout | default('') | trim | from_json)
+        if ((_python_hku_probe.stdout | default('') | trim | length) > 0)
+        else {'loaded_user_hives': 0, 'findings': []}
+      }}
+  changed_when: false
+
+- name: pythonResolve | Advisory event when per-user Python is detected
+  ansible.builtin.set_fact:
+    choco_deploy_report_errors: >-
+      {{
+        (choco_deploy_report_errors | default([])) + [{
+          'software':  'python-hku',
+          'operation': 'per-user-python-advisory',
+          'message': (
+            'Detected ' ~ (choco_python_hku.findings | length) ~
+            ' per-user Python install(s) under HKEY_USERS across ' ~
+            (choco_python_hku.loaded_user_hives | default(0)) ~
+            ' loaded user hive(s). These are NOT touched by the HKLM-only sweep. ' ~
+            'Tracks found: ' ~ (choco_python_hku.findings | map(attribute='track') | unique | sort | join(', ')) ~
+            '. Users: ' ~ (choco_python_hku.findings | map(attribute='user') | reject('equalto', None) | unique | sort | join(', '))
+          )
+        }]
+      }}
+  when:
+    - (choco_python_hku.findings | default([]) | length) > 0
+  changed_when: false
+
+- name: pythonResolve | Per-user Python discovery summary
+  ansible.builtin.debug:
+    msg: >-
+      pythonResolve HKU loaded_user_hives={{ choco_python_hku.loaded_user_hives | default(0) }},
+      python_findings={{ choco_python_hku.findings | default([]) | length }},
+      tracks={{ choco_python_hku.findings | default([]) | map(attribute='track') | unique | list | sort }}
+  when: choco_deploy_console_verbose | default(false) | bool
+  changed_when: false
+
+- name: pythonResolve | Build track alignment list
+  ansible.builtin.set_fact:
+    choco_python_tracks_to_align: >-
+      {%- if (_python_explicit_tracks | default([]) | length) > 0 -%}
+        {%- set raw_tracks = _python_explicit_tracks -%}
+      {%- elif deployment == 'choco_baseline' -%}
+        {%- set raw_tracks = _python_channels.keys() | list | sort -%}
+      {%- elif deployment == 'choco_conversion' -%}
+        {%- set raw_tracks = ((_python_choco_tracks | default([])) + (_python_vendor_tracks | default([]))) | unique | sort -%}
+      {%- else -%}
+        {%- set raw_tracks = _python_choco_tracks | default([]) -%}
+      {%- endif -%}
+      {%- set floor_required = (
+            (choco_target_runtime_map.python | default({})).floor_required
+            | default(acceptable_versions.runtimes.python.floor_required | default(false))
+          ) | bool -%}
+      {%- set floor_track = (
+            (choco_target_runtime_map.python | default({})).min_supported_track
+            | default(acceptable_versions.runtimes.python.min_supported_track | default(''), true)
+          ) -%}
+      {%- if floor_required and (floor_track | length) > 0 and (_python_channels[floor_track] is defined) and (floor_track not in raw_tracks) -%}
+        {%- set raw_tracks = (raw_tracks + [floor_track]) | unique | sort -%}
+      {%- endif -%}
+      {%- set result = [] -%}
+      {%- for t in raw_tracks if _python_channels[t] is defined -%}
+        {%- set ch = _python_channels[t] -%}
+        {%- set ch_min = ch.min_version | default('') -%}
+        {%- set ch_pkg = ch.package_name | default('python' ~ (t | replace('.', ''))) -%}
+        {%- set mv = _python_override_min if (_python_override_min | length > 0 and (_python_explicit_tracks | length) == 1) else ch_min -%}
+        {%- set pk = _python_override_pkg if (_python_override_pkg | length > 0 and (_python_explicit_tracks | length) == 1) else ch_pkg -%}
+        {%- set _ = result.append({
+          'track': t,
+          'min_version': mv,
+          'pkg': pk
+        }) -%}
+      {%- endfor -%}
+      {{ result }}
+    choco_python_managed_tracks: "{{ _python_channels.keys() | list | sort }}"
+    choco_python_exclusive: >-
+      {{
+        ((choco_target_runtime_map.python | default({})).exclusive
+         | default(acceptable_versions.runtimes.python.exclusive | default(false)))
+        | bool
+      }}
+    choco_python_min_supported_track: >-
+      {{
+        (choco_target_runtime_map.python | default({})).min_supported_track
+        | default(acceptable_versions.runtimes.python.min_supported_track | default(''), true)
+      }}
+    choco_python_floor_required: >-
+      {{
+        ((choco_target_runtime_map.python | default({})).floor_required
+         | default(acceptable_versions.runtimes.python.floor_required | default(false)))
+        | bool
+      }}
+  changed_when: false
+
+- name: pythonResolve | Summary
+  ansible.builtin.debug:
+    msg: >-
+      pythonResolve: tracks={{ choco_python_tracks_to_align | map(attribute='track') | list }},
+      managed_tracks={{ choco_python_managed_tracks }},
+      exclusive={{ choco_python_exclusive }},
+      min_supported_track={{ choco_python_min_supported_track | default('(none)') }},
+      floor_required={{ choco_python_floor_required }},
+      deployment={{ deployment }}
+  when: choco_deploy_console_verbose | default(false) | bool
+  changed_when: false

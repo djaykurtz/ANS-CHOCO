@@ -1,0 +1,11 @@
+---
+- name: Apps | Align microsoft-teams-new-bootstrapper
+  ansible.builtin.include_tasks: ops/install-one.yml
+  vars:
+    pkg:
+      name: microsoft-teams-new-bootstrapper
+      version: "{{ choco_target_min_version_map[app_catalog_item.key] | default(acceptable_versions.applications.microsoft_teams_new_bootstrapper.min_version) }}"
+      conflicts:
+        - microsoft-teams
+        - microsoft-teams.install
+      registry_patterns: "{{ app_catalog_item.registry_patterns | default(['^Microsoft Teams(?! Meeting Add-in)', '^Teams Machine-Wide Installer$']) }}"

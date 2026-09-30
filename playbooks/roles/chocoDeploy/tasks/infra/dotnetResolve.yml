@@ -1,0 +1,169 @@
+---
+# infra/dotnetResolve.yml
+# Determine which .NET runtime tracks to align for this run.
+# Produces choco_dotnet_tracks_to_align - a list of dicts each with:
+#   track, min_version, family, pkg
+#
+# Track resolution order:
+#   1. Explicit tracks/track from targetRuntimes override
+#   2. Auto-detect based on deployment mode:
+#      - baseline: all tracks defined in channels config
+#      - conversion: tracks found in choco inventory + vendor runtimes
+#      - update: tracks found in choco inventory only
+#   3. Only tracks with a configured channel min_version are processed.
+
+- name: dotnetResolve | Determine family and channels
+  ansible.builtin.set_fact:
+    _dotnet_family: >-
+      {{
+        (choco_target_runtime_map.dotnet_runtime | default({})).family
+        | default(acceptable_versions.runtimes.dotnet_runtime.family, true)
+        | default('aspnetruntime')
+      }}
+    _dotnet_channels: "{{ acceptable_versions.runtimes.dotnet_runtime.channels | default({}) }}"
+    _dotnet_explicit_tracks: >-
+      {%- set rt = choco_target_runtime_map.dotnet_runtime | default({}) -%}
+      {%- if rt.tracks is defined and (rt.tracks | length) > 0 -%}
+        {{ rt.tracks }}
+      {%- elif rt.track is defined and (rt.track | length) > 0 -%}
+        {{ [rt.track] }}
+      {%- else -%}
+        []
+      {%- endif -%}
+    _dotnet_override_min: "{{ (choco_target_runtime_map.dotnet_runtime | default({})).min_version | default('') }}"
+    # Per-channel overrides (e.g. test-pin files), keyed by track: {"8.0": {"min_version": "8.0.30"}}.
+    # Takes priority over the single-track min_version override below, and works
+    # across multiple tracks in one run (the single-track override does not).
+    _dotnet_channel_overrides: "{{ (choco_target_runtime_map.dotnet_runtime | default({})).channels | default({}) }}"
+  changed_when: false
+
+- name: dotnetResolve | Detect tracks from Chocolatey inventory
+  ansible.builtin.set_fact:
+    _dotnet_choco_tracks: >-
+      {%- set found = [] -%}
+      {%- set prefix = 'dotnet-' -%}
+      {%- set families = ['aspnetruntime', 'runtime', 'windowsdesktop-runtime'] -%}
+      {%- for key in choco_installed_map.keys() -%}
+        {%- if key.startswith(prefix) -%}
+          {%- for fam in families -%}
+            {%- set suffix = '-' ~ fam -%}
+            {%- if key.endswith(suffix) -%}
+              {%- set track_str = key[prefix | length:][:-(suffix | length)] -%}
+              {%- if track_str is match('^[0-9]+\.[0-9]+$') -%}
+                {%- set _ = found.append(track_str) -%}
+              {%- endif -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ found | unique | sort }}
+  when: (_dotnet_explicit_tracks | length) == 0
+  changed_when: false
+
+- name: dotnetResolve | Detect vendor .NET runtime tracks
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $dotnetExe = Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'
+    if (-not (Test-Path $dotnetExe)) { '[]'; exit 0 }
+    $tracks = @()
+    & $dotnetExe --list-runtimes 2>$null | ForEach-Object {
+      if ($_ -match '^Microsoft\.\S+\s+(\d+\.\d+)\.\d+') {
+        $tracks += $Matches[1]
+      }
+    }
+    $unique = @($tracks | Sort-Object -Unique)
+    $parts = @(); foreach ($t in $unique) { $parts += "`"$t`"" }
+    '[' + ($parts -join ',') + ']'
+  register: _dotnet_vendor_probe
+  changed_when: false
+  failed_when: false
+  when:
+    - (_dotnet_explicit_tracks | length) == 0
+    - deployment == 'choco_conversion'
+
+- name: dotnetResolve | Parse vendor tracks
+  ansible.builtin.set_fact:
+    _dotnet_vendor_tracks: >-
+      {{
+        (_dotnet_vendor_probe.stdout | default('[]') | trim | from_json)
+        if (_dotnet_vendor_probe.stdout | default('') | trim | length > 0)
+        else []
+      }}
+  when:
+    - (_dotnet_explicit_tracks | length) == 0
+    - deployment == 'choco_conversion'
+  changed_when: false
+
+- name: dotnetResolve | Build track alignment list and sweep policy
+  ansible.builtin.set_fact:
+    choco_dotnet_tracks_to_align: >-
+      {%- if (_dotnet_explicit_tracks | default([]) | length) > 0 -%}
+        {%- set raw_tracks = _dotnet_explicit_tracks -%}
+      {%- elif deployment == 'choco_baseline' -%}
+        {%- set raw_tracks = _dotnet_channels.keys() | list | sort -%}
+      {%- elif deployment == 'choco_conversion' -%}
+        {%- set raw_tracks = ((_dotnet_choco_tracks | default([])) + (_dotnet_vendor_tracks | default([]))) | unique | sort -%}
+      {%- else -%}
+        {%- set raw_tracks = _dotnet_choco_tracks | default([]) -%}
+      {%- endif -%}
+      {%- set floor_required = (
+            (choco_target_runtime_map.dotnet_runtime | default({})).floor_required
+            | default(acceptable_versions.runtimes.dotnet_runtime.floor_required | default(false))
+          ) | bool -%}
+      {%- set floor_track = (
+            (choco_target_runtime_map.dotnet_runtime | default({})).min_supported_track
+            | default(acceptable_versions.runtimes.dotnet_runtime.min_supported_track | default(''), true)
+          ) -%}
+      {%- if floor_required and (floor_track | length) > 0 and (_dotnet_channels[floor_track] is defined) and (floor_track not in raw_tracks) -%}
+        {%- set raw_tracks = (raw_tracks + [floor_track]) | unique | sort -%}
+      {%- endif -%}
+      {%- set result = [] -%}
+      {%- for t in raw_tracks if _dotnet_channels[t] is defined -%}
+        {%- set ch_min = (_dotnet_channels[t]).min_version | default('') -%}
+        {%- set channel_override = (_dotnet_channel_overrides[t].min_version | default('')) if (_dotnet_channel_overrides[t] is defined) else '' -%}
+        {%- set single_override = _dotnet_override_min if (_dotnet_override_min | length > 0 and (_dotnet_explicit_tracks | length) == 1) else '' -%}
+        {%- set mv = channel_override if (channel_override | length > 0) else (single_override if (single_override | length > 0) else ch_min) -%}
+        {%- set _ = result.append({
+          'track': t,
+          'min_version': mv,
+          'family': _dotnet_family,
+          'pkg': 'dotnet-' ~ t ~ '-' ~ _dotnet_family
+        }) -%}
+      {%- endfor -%}
+      {{ result }}
+    choco_dotnet_managed_tracks: "{{ _dotnet_channels.keys() | list | sort }}"
+    choco_dotnet_family: "{{ _dotnet_family }}"
+    choco_dotnet_exclusive: >-
+      {{
+        ((choco_target_runtime_map.dotnet_runtime | default({})).exclusive
+         | default(acceptable_versions.runtimes.dotnet_runtime.exclusive | default(false)))
+        | bool
+      }}
+    choco_dotnet_min_supported_track: >-
+      {{
+        (choco_target_runtime_map.dotnet_runtime | default({})).min_supported_track
+        | default(acceptable_versions.runtimes.dotnet_runtime.min_supported_track | default(''), true)
+      }}
+    choco_dotnet_floor_required: >-
+      {{
+        ((choco_target_runtime_map.dotnet_runtime | default({})).floor_required
+         | default(acceptable_versions.runtimes.dotnet_runtime.floor_required | default(false)))
+        | bool
+      }}
+  changed_when: false
+
+- name: dotnetResolve | Summary
+  ansible.builtin.debug:
+    msg: >-
+      dotnetResolve:
+      family={{ _dotnet_family }},
+      explicit_tracks={{ _dotnet_explicit_tracks | default([]) }},
+      choco_detected={{ _dotnet_choco_tracks | default([]) }},
+      vendor_detected={{ _dotnet_vendor_tracks | default([]) }},
+      tracks_to_align={{ choco_dotnet_tracks_to_align | map(attribute='track') | list }},
+      managed_tracks={{ choco_dotnet_managed_tracks }},
+      exclusive={{ choco_dotnet_exclusive }},
+      min_supported_track={{ choco_dotnet_min_supported_track | default('(none)') }},
+      floor_required={{ choco_dotnet_floor_required }}
+  when: choco_deploy_console_verbose | default(false) | bool
+  changed_when: false

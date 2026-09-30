@@ -1,0 +1,135 @@
+# defaults/main.yml -- softwareUsage role
+#
+# Catalog of executables to look for in Security log EventID 4688 events
+# (process creation) over the lookback window. The role reads the Security
+# event log on each target, buckets every process-create event whose
+# NewProcessName basename matches one of the executables below, and reports
+# per-app execution counts plus a 'verdict' field.
+#
+# This catalog is intentionally separate from chocoDeploy's choco_managed_apps
+# -- usage targets do not need to match alignment targets one-for-one.
+#
+# Override per inventory by setting tracked_apps in group_vars/host_vars.
+
+# How many days back to scan the Security log.
+# Overridable per run: -e usage_days=N
+usage_days: 30
+
+# Minimum executions required for verdict 'used_recently'.
+# 1 = "ran at all"; 2 = matches your phrasing of "more than once".
+# Overridable per run: -e usage_min_executions=N
+usage_min_executions: 2
+
+# Where reports land
+usage_report_dir_remote: 'C:\tools\usagelog'
+usage_report_dir_local:  "{{ chocofleet_data_root }}/LOGS/softwareUsage"
+
+# Cap on how many distinct (parent, user, cmdline) records to keep per app per host.
+# Keeps the JSON small on noisy hosts. Set to 0 to disable.
+usage_max_detail_rows_per_app: 25
+
+# When 'Audit Process Creation' is OFF, we cannot read 4688 events. The role
+# records verdict 'audit_off' for every app and continues. No NTFS fallback.
+usage_honest_when_audit_off: true
+
+# ---------------------------------------------------------------------------
+# tracked_apps -- the catalog
+# ---------------------------------------------------------------------------
+# Each entry has:
+#   key                 unique short id, used in report and JSON
+#   label               display name
+#   executables         list of EXE basenames to match (case-insensitive)
+#   notes               optional, shows in the HTML report
+#
+# To add a new app, append an entry. To track only a subset for a particular
+# inventory, override the whole tracked_apps list in group_vars.
+tracked_apps:
+  - key: python
+    label: Python
+    executables:
+      - python.exe
+      - pythonw.exe
+      - py.exe
+    notes: "Tracks all installed Python interpreters (Chocolatey-managed, vendor MSI, embedded, Anaconda)."
+
+  - key: powershell_core
+    label: PowerShell Core (pwsh)
+    executables:
+      - pwsh.exe
+    notes: "PowerShell 7+. Windows PowerShell 5.1 (powershell.exe) is NOT tracked here -- it runs constantly via system tooling."
+
+  - key: dotnet
+    label: .NET CLI
+    executables:
+      - dotnet.exe
+    notes: "Tracks dotnet driver invocations. Background dotnet host processes spawned by IIS or services are still counted."
+
+  - key: docker_desktop
+    label: Docker Desktop
+    executables:
+      - "Docker Desktop.exe"
+      - dockerd.exe
+      - docker.exe
+      - com.docker.backend.exe
+
+  - key: 7zip
+    label: 7-Zip
+    executables:
+      - 7zFM.exe
+      - 7zG.exe
+      - 7z.exe
+
+  - key: git
+    label: Git
+    executables:
+      - git.exe
+      - gitk.exe
+
+  - key: greenshot
+    label: Greenshot
+    executables:
+      - Greenshot.exe
+
+  - key: teams
+    label: Microsoft Teams
+    executables:
+      - ms-teams.exe
+      - Teams.exe
+
+  - key: pycharm
+    label: PyCharm
+    executables:
+      - pycharm64.exe
+      - pycharm.exe
+
+  - key: putty
+    label: PuTTY suite
+    executables:
+      - putty.exe
+      - pscp.exe
+      - psftp.exe
+      - plink.exe
+      - puttygen.exe
+
+  - key: vim
+    label: Vim
+    executables:
+      - vim.exe
+      - gvim.exe
+
+  - key: vscode
+    label: VS Code
+    executables:
+      - Code.exe
+
+  - key: winscp
+    label: WinSCP
+    executables:
+      - WinSCP.exe
+      - WinSCP.com
+
+  - key: notepadplusplus
+    label: "Notepad++ (removal candidate)"
+    executables:
+      - notepad++.exe
+    notes: "Tracked even though removal catalog targets it -- helps justify removal decisions."

@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="ANS-CHOCO: a code-grounded visual walkthrough of Ansible roles, Chocolatey packages, Windows targets, and deployment evidence.">
+  <title>ANS-CHOCO / Architecture movements</title>
+  <link rel="stylesheet" href="assets/showcase.css">
+  <script src="assets/showcase.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#text-model">Skip diagram to textual architecture</a>
+  <header class="masthead">
+    <a class="brand" href="./" aria-label="ANS-CHOCO architecture home">
+      <span class="signal" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+      <span>ANS-CHOCO</span>
+    </a>
+    <span class="eyebrow">Architecture movements / 01</span>
+    <a href="https://github.com/djaykurtz/ANS-CHOCO">Source repository <span aria-hidden="true">&nearr;</span></a>
+  </header>
+
+  <main>
+    <section class="intro" aria-labelledby="page-title">
+      <div>
+        <p class="eyebrow">Ansible / Chocolatey / Windows</p>
+        <h1 id="page-title">From approved package<br>to accountable change.</h1>
+      </div>
+      <div class="intro-note">
+        <p>A catalog defines intent. Roles reconcile the host. Evidence records what actually happened.</p>
+        <p class="caption">Static educational model. No fleet connection, credentials, or execution controls.</p>
+      </div>
+    </section>
+
+    <section class="architecture" aria-labelledby="diagram-heading">
+      <div class="section-heading">
+        <h2 id="diagram-heading">The system, in one frame</h2>
+        <span class="eyebrow">Current source paths / dashed cards below = proposed or incomplete</span>
+      </div>
+      <p class="mobile-note">On small screens, scroll the diagram horizontally or use the textual architecture below.</p>
+      <div class="diagram-scroll" tabindex="0" role="region" aria-label="Scrollable architecture diagram">
+        <svg class="system-diagram" viewBox="0 0 1440 620" role="img" aria-labelledby="svg-title svg-description">
+          <title id="svg-title">ANS-CHOCO's current software-alignment architecture</title>
+          <desc id="svg-description">A reviewed repository provides catalogs, playbooks, inventory and policy. A Linux controller loads local vault credentials, executes chocoBuild or chocoDeploy, and uses WinRM to reach authorized Windows hosts. Build helpers produce packages for configured sources. Windows PowerShell and Chocolatey reconcile installation state. JSON and HTML evidence return to controller-side fleet reporting. Build iteration reuses deployment logic. The textual architecture below explains each relationship and its implementation boundaries.</desc>
+          <defs>
+            <marker id="arrow-net" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7" fill="#35e0e8"/></marker>
+            <marker id="arrow-storage" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7" fill="#a78bfa"/></marker>
+            <marker id="arrow-control" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7" fill="#edb200"/></marker>
+            <marker id="arrow-orch" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7" fill="#00c758"/></marker>
+            <marker id="arrow-work" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 L7 3.5 L0 7" fill="#fe6e00"/></marker>
+          </defs>
+          <g class="lane-labels"><text x="32" y="31">REVIEWABLE SOURCE</text><text x="390" y="31">LINUX CONTROL PLANE</text><text x="932" y="31">WINDOWS / ARTIFACT PLANE</text></g>
+          <g class="connections" fill="none">
+            <path class="connection control" data-steps="1" d="M312 122 H390" marker-end="url(#arrow-control)"/>
+            <path class="connection storage" data-steps="2" d="M312 320 H350 V291 H390" marker-end="url(#arrow-storage)"/>
+            <path class="connection orchestration" data-steps="3 4" d="M312 483 H370 V143 H390" marker-end="url(#arrow-orch)"/>
+            <path class="connection orchestration" data-steps="2" d="M499 160 V210" marker-end="url(#arrow-orch)"/>
+            <path class="connection orchestration" data-steps="4" d="M741 160 V210" marker-end="url(#arrow-orch)"/>
+            <path class="connection storage" data-steps="2" d="M608 265 H620 V187 H918 V128 H932" marker-end="url(#arrow-storage)"/>
+            <path class="connection network" data-steps="4" d="M850 289 H932" marker-end="url(#arrow-net)"/>
+            <path class="connection storage" data-steps="2 4" d="M1162 188 V235" marker-end="url(#arrow-storage)"/>
+            <path class="connection control" data-steps="4" d="M499 438 V388" marker-end="url(#arrow-control)"/>
+            <path class="connection control" data-steps="4" d="M608 505 H620 V350 H632" marker-end="url(#arrow-control)"/>
+            <path class="connection orchestration" data-steps="2" d="M499 388 V410 H741 V388" marker-end="url(#arrow-orch)"/>
+            <path class="connection storage" data-steps="5" d="M932 375 H899 V503 H850" marker-end="url(#arrow-storage)"/>
+            <path class="connection work" data-steps="4 5" d="M1162 423 V470" marker-end="url(#arrow-work)"/>
+          </g>
+          <g class="edge-labels">
+            <text x="328" y="107">load</text><text x="627" y="181">.nupkg</text>
+            <text x="860" y="277">WinRM</text><text x="1177" y="218">source</text>
+            <text x="514" y="429">iterate install reuses chocoDeploy</text>
+            <text x="1169" y="452">write evidence</text>
+          </g>
+
+          <g class="node" data-steps="1">
+            <rect x="32" y="70" width="280" height="172" rx="3"/>
+            <text class="node-kicker" x="50" y="98">01 / REPOSITORY CONTRACT</text>
+            <text class="node-title" x="50" y="128">Reviewed configuration</text>
+            <text x="50" y="156">playbooks/ + role task trees</text>
+            <text x="50" y="181">requirements.yml collections</text>
+            <text x="50" y="206">Manual Azure / Arc samples</text>
+            <text class="node-foot" x="50" y="228">External pull script not included</text>
+          </g>
+          <g class="node" data-steps="1 2">
+            <rect x="32" y="267" width="280" height="124" rx="3"/>
+            <text class="node-kicker" x="50" y="295">PACKAGE INTENT</text>
+            <text class="node-title" x="50" y="322">Catalog + version floors</text>
+            <text x="50" y="350">internalize / wrapper specs</text>
+            <text class="node-foot" x="50" y="374">validate_catalog.py checks consistency</text>
+          </g>
+          <g class="node" data-steps="3">
+            <rect x="32" y="417" width="280" height="153" rx="3"/>
+            <text class="node-kicker" x="50" y="445">03 / TARGET BOUNDARY</text>
+            <text class="node-title" x="50" y="473">CSV + AD export + policy</text>
+            <text x="50" y="501">csv_to_inventory.py excludes OUs</text>
+            <text x="50" y="526">inventory + adjacent group_vars</text>
+            <text class="node-foot" x="50" y="551">UI / manual inventories bypass this gate</text>
+          </g>
+
+          <g class="node" data-steps="2 3 4">
+            <rect x="390" y="70" width="460" height="90" rx="3"/>
+            <text class="node-kicker" x="408" y="96">CONTROLLER / NOT A WINDOWS AGENT</text>
+            <text class="node-title" x="408" y="123">Ansible playbooks + pinned collections</text>
+            <text class="node-foot" x="408" y="147">chocoBuild / chocoDeploy / patchReady / softwareUsage</text>
+          </g>
+          <g class="node cutaway" data-steps="2">
+            <rect x="390" y="210" width="218" height="178" rx="3"/>
+            <text class="node-kicker" x="408" y="238">02 / BUILD ROLE</text>
+            <text class="node-title" x="408" y="265">chocoBuild</text>
+            <text x="408" y="293">Community internalization</text>
+            <text x="408" y="318">SHA-verified wrappers</text>
+            <text x="408" y="343">Lab extract / repack</text>
+            <text class="node-foot" x="408" y="369">Helpers execute on Windows</text>
+          </g>
+          <g class="node cutaway" data-steps="4">
+            <rect x="632" y="210" width="218" height="178" rx="3"/>
+            <text class="node-kicker" x="650" y="238">04 / DEPLOY ROLE</text>
+            <text class="node-title" x="650" y="265">chocoDeploy</text>
+            <text x="650" y="293">5 modes / drift detection</text>
+            <text x="650" y="318">Apps + runtime alignment</text>
+            <text x="650" y="343">Removal / reboot policy</text>
+            <text class="node-foot" x="650" y="369">report in always; re-raise fatal</text>
+          </g>
+          <g class="node private-boundary" data-steps="4">
+            <rect x="390" y="438" width="218" height="132" rx="3"/>
+            <text class="node-kicker" x="408" y="466">PRIVATE / NEVER PUBLISHED</text>
+            <text class="node-title" x="408" y="493">Local vault/</text>
+            <text x="408" y="520">vars_files + vault password</text>
+            <text class="node-foot" x="408" y="546">Key Vault retrieval is not integrated</text>
+          </g>
+          <g class="node" data-steps="5">
+            <rect x="632" y="438" width="218" height="132" rx="3"/>
+            <text class="node-kicker" x="650" y="466">05 / CONTROLLER EVIDENCE</text>
+            <text class="node-title" x="650" y="493">Fleet summary</text>
+            <text x="650" y="520">JSON input / latest result wins</text>
+            <text class="node-foot" x="650" y="546">HTML + optional JSON / text</text>
+          </g>
+
+          <g class="node" data-steps="2 4">
+            <rect x="932" y="70" width="460" height="118" rx="3"/>
+            <text class="node-kicker" x="950" y="98">ARTIFACT SOURCE / CONFIGURED SEPARATELY</text>
+            <text class="node-title" x="950" y="126">Build lab &gt; .nupkg &gt; package source</text>
+            <text x="950" y="153">SMB mirror / NuGet repository / public feed</text>
+            <text class="node-foot" x="950" y="176">Build supply differs from deployment; test before promotion</text>
+          </g>
+          <g class="node target-cutaway" data-steps="4">
+            <rect x="932" y="235" width="460" height="188" rx="3"/>
+            <text class="node-kicker" x="950" y="263">AUTHORIZED WINDOWS TARGETS</text>
+            <text class="node-title" x="950" y="290">Host-state reconciliation</text>
+            <rect class="inner" x="950" y="309" width="424" height="36" rx="2"/>
+            <text x="965" y="332">WinRM &gt; PowerShell helpers &gt; Chocolatey</text>
+            <rect class="inner" x="950" y="356" width="424" height="36" rx="2"/>
+            <text x="965" y="379">Installed packages + registry / vendor installers</text>
+            <text class="node-foot" x="950" y="410">Defaults: NTLM / HTTP 5985; chocoDeploy reboot = never</text>
+          </g>
+          <g class="node" data-steps="4 5">
+            <rect x="932" y="470" width="460" height="100" rx="3"/>
+            <text class="node-kicker" x="950" y="498">TARGET &amp; CONTROLLER OUTPUT</text>
+            <text class="node-title" x="950" y="525">Per-run JSON / daily host HTML</text>
+            <text class="node-foot" x="950" y="551">Readiness + usage are separate playbooks; preserve evidence</text>
+          </g>
+          <text class="diagram-foot" x="32" y="604">A SOURCE MODEL, NOT A PRODUCTION TOPOLOGY. COLORS DESCRIBE CONNECTION KIND; THEY DO NOT CLAIM HEALTH OR SUCCESS.</text>
+        </svg>
+      </div>
+      <div class="legend" aria-label="Connection types">
+        <span><i class="network"></i>Transport</span>
+        <span><i class="storage"></i>Artifacts / evidence</span>
+        <span><i class="control"></i>Configuration / credentials</span>
+        <span><i class="orchestration"></i>Role orchestration</span>
+        <span><i class="work"></i>Host work</span>
+      </div>
+    </section>
+
+    <section class="movements" aria-labelledby="movement-heading">
+      <div class="movement-header">
+        <h2 id="movement-heading">Follow the movement</h2>
+        <div class="navigation"><button id="previous" type="button" aria-label="Previous architecture movement">&larr;</button><button id="next" type="button" aria-label="Next architecture movement">&rarr;</button></div>
+      </div>
+      <div class="stepper" role="group" aria-label="Architecture movements: arrow keys, Home and End also navigate">
+        <button type="button" data-step="0" aria-current="step"><span>00</span> Overview</button>
+        <button type="button" data-step="1"><span>01</span> Review</button>
+        <button type="button" data-step="2"><span>02</span> Build</button>
+        <button type="button" data-step="3"><span>03</span> Scope</button>
+        <button type="button" data-step="4"><span>04</span> Align</button>
+        <button type="button" data-step="5"><span>05</span> Evidence</button>
+      </div>
+      <div class="movement-copy" aria-live="polite" aria-atomic="true">
+        <p class="eyebrow" id="movement-label">00 / Full system</p>
+        <h3 id="movement-title">Separate intent, execution, and evidence.</h3>
+        <p id="movement-description">The repository describes approved state. The controller assembles and runs roles. Windows helpers reconcile the actual host. Reports describe outcomes, not guarantees.</p>
+        <p class="caption" id="movement-boundary">Explore without connecting to a host. The published page is static and carries no vault, inventory exports, or real deployment reports.</p>
+      </div>
+      <noscript><p>The full diagram and textual architecture are available without JavaScript. Movement highlighting requires JavaScript.</p></noscript>
+    </section>
+
+    <section class="boundaries" aria-labelledby="boundary-heading">
+      <h2 id="boundary-heading">Not every layer is finished</h2>
+      <div class="boundary-grid">
+        <article class="incomplete">
+          <p class="eyebrow">Fail-fast stubs</p><h3>Build operations are explicit about absence.</h3>
+          <p>First-party authoring, family classification, and standalone extract/repack/sign/verify tasks fail with a clear stub message. Community and wrapper paths and on-target iteration are implemented separately. SHA checking is not package signing.</p>
+        </article>
+        <article class="incomplete">
+          <p class="eyebrow">Partial / proposed layers</p><h3>No invented orchestration.</h3>
+          <p><code>sysPatch</code> delegates update work to <code>winUpdate</code> but lacks verification/report tasks and an entry playbook. Key Vault retrieval exists but fleet plays still use local vault files. Semaphore, automatic remediation, and external Arc checkout management are not supplied integrations.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="text-model" id="text-model" aria-labelledby="text-heading">
+      <p class="eyebrow">Textual equivalent + source evidence</p>
+      <h2 id="text-heading">Read the architecture as contracts.</h2>
+      <div class="contract-grid">
+        <article>
+          <h3>01 / Reviewed intent</h3>
+          <p>The shared package catalog describes identity, approved versions, acquisition, and intended mirror versions. Role defaults supply floors and selection/removal policy. The validator checks consistency, not live package availability.</p>
+          <a href="https://github.com/djaykurtz/ANS-CHOCO/blob/main/playbooks/catalogs/chocolatey_packages.yml">catalogs/chocolatey_packages.yml</a>
+          <a href="https://github.com/djaykurtz/ANS-CHOCO/blob/main/playbooks/tools/validate_catalog.py">tools/validate_catalog.py</a>
+        </article>
+        <article>
+          <h3>02 / Prepared artifacts</h3>
+          <p><code>chocoBuild.yml</code> runs community or wrapper tasks on a Windows build target. PowerShell bundles vendor installers and checks wrapper integrity. Iteration's install action includes <code>chocoDeploy</code> with a single package/local source, reusing install logic rather than duplicating it.</p>
+          <a href="https://github.com/djaykurtz/ANS-CHOCO/blob/main/playbooks/chocoBuild.yml">playbooks/chocoBuild.yml</a>
+          <a href="https://github.com/djaykurtz/ANS-CHOCO/blob/main/playbooks/roles/chocoBuild/tasks/iterate/install-on-target.yml">chocoBuild / iterate / install-on-target.yml</a>
+        </article>
+        <article>
+          <h3>03 / Target scope</h3>
+          <p><code>csv_to_inventory.py</code> combines CSV and AD evidence, removes protected-OU targets, and optionally probes reachable hosts. Generated inventories carry adjacent WinRM group variables. Unknown hosts are warned, not excluded. Manual/UI inventories bypass the OU process check.</p>
+          <a href="https://github.com/djaykurtz/ANS-CHOCO/blob/main/playbooks/tools/csv_to_inventory.py">tools/csv_to_inventory.py</a>
+          <a href="https://github.com/djaykurtz/ANS-CHOCO/blob/main/playbooks/policies/target_exclusions.yml">policies/target_exclusions.yml</a>
+        </article>
+        <article>
+          <h3>04 / Execute with boundaries</h3>
+          <p>Fleet plays load file-based credentials from ignored <code>vault/</code>. Ansible reaches Windows via WinRM. <code>chocoDeploy</code> reconciles registry/Chocolatey state, routes sources, applies application/runtime policy, records errors and finalizes evidence. Reboots default to never. Conversion can remove a vendor install before replacement succeeds.</p>
+          <a href="https://github.com/djaykurtz/ANS-CHOCO/blob/main/playbooks/chocoDeploy.yml">playbooks/chocoDeploy.yml</a>
+          <a href="https://github.com/djaykurtz/ANS-CHOCO/blob/main/playbooks/roles/chocoDeploy/tasks/main.yml">chocoDeploy / tasks / main.yml</a>
+        </article>
+        <article>
+          <h3>05 / Account for the result</h3>
+          <p>Deployment writes per-run JSON and daily host HTML. Controller roll-ups combine the final result per software, resolve successful retries, and distinguish reboot advisories. <code>report_only</code> rebuilds existing target evidence, not a new scan. The watcher follows terminal logs; recovery tools collect missing evidence.</p>
+          <a href="https://github.com/djaykurtz/ANS-CHOCO/blob/main/playbooks/roles/chocoDeploy/tasks/ops/report.yml">chocoDeploy / ops / report.yml</a>
+          <a href="https://github.com/djaykurtz/ANS-CHOCO/blob/main/playbooks/roles/chocoDeploy/files/fleet_summary.py">chocoDeploy / files / fleet_summary.py</a>
+        </article>
+        <article>
+          <h3>Adjacent roles / separate purposes</h3>
+          <p><code>patchReady</code> checks reachability/reboot/disk/Chocolatey and archives older logs. <code>softwareUsage</code> reads Security 4688 events and may expose private usernames/command lines. Legacy domain-join helpers are outside this deployment flow. Optional cloud samples require separately provisioned infrastructure.</p>
+          <a href="https://github.com/djaykurtz/ANS-CHOCO/blob/main/playbooks/patchReady.yml">playbooks/patchReady.yml</a>
+          <a href="https://github.com/djaykurtz/ANS-CHOCO/blob/main/playbooks/softwareUsage.yml">playbooks/softwareUsage.yml</a>
+        </article>
+      </div>
+    </section>
+    <footer>
+      <span>David Kurtz / <a href="https://github.com/djaykurtz">djaykurtz</a></span>
+      <span>Designed for explanation. Not a live operations console.</span>
+      <a href="https://github.com/djaykurtz/ANS-CHOCO#readme">Quickstart + implementation limits &nearr;</a>
+    </footer>
+  </main>
+</body>
+</html>

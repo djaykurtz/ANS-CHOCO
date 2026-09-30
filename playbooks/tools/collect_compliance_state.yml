@@ -1,0 +1,69 @@
+---
+# Read-only live compliance evidence collection.
+# No installs, removals, upgrades, or reboots.
+
+- name: Collect live compliance state
+  hosts: basic_hosts
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  tasks:
+    - name: Gather structured Chocolatey package facts
+      chocolatey.chocolatey.win_chocolatey_facts:
+        filter:
+          - packages
+      register: chocolatey_state
+      changed_when: false
+      failed_when: false
+
+    - name: Query uninstall registry, .NET, and Framework state
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'SilentlyContinue'
+        $programs = @()
+        $paths = @(
+          'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+          'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        )
+        foreach ($path in $paths) {
+          Get-ItemProperty $path | Where-Object { $_.DisplayName } | ForEach-Object {
+            $programs += [pscustomobject]@{
+              display_name = [string]$_.DisplayName
+              display_version = [string]$_.DisplayVersion
+              publisher = [string]$_.Publisher
+            }
+          }
+        }
+        $dotnet = @()
+        if (Get-Command dotnet -ErrorAction SilentlyContinue) {
+          dotnet --list-runtimes 2>$null | ForEach-Object { $dotnet += [string]$_ }
+        }
+        $fx = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full' -ErrorAction SilentlyContinue
+        $reboot = @()
+        if (Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager') {
+          $pending = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -ErrorAction SilentlyContinue).PendingFileRenameOperations
+          if ($pending) { $reboot += 'SessionMgr:PendingFileRenameOperations' }
+        }
+        [pscustomobject]@{
+          programs = $programs
+          dotnet_runtimes = $dotnet
+          netfx_release = [int]($fx.Release | ForEach-Object { $_ })
+          netfx_version = [string]$fx.Version
+          pending_reboot_reasons = $reboot
+        } | ConvertTo-Json -Depth 6 -Compress
+      register: compliance_state
+      changed_when: false
+      failed_when: false
+
+    - name: Ensure compliance evidence directory exists
+      ansible.builtin.file:
+        path: "{{ compliance_state_dir | default(chocofleet_data_root ~ '/LOGS/chocoDeploy/compliance-state') }}"
+        state: directory
+      delegate_to: localhost
+      run_once: true
+
+    - name: Write raw compliance state on control node
+      ansible.builtin.copy:
+        dest: "{{ compliance_state_dir | default(chocofleet_data_root ~ '/LOGS/chocoDeploy/compliance-state') }}/{{ inventory_hostname }}.json"
+        content: "{{ {'host': inventory_hostname, 'reachable': (compliance_state.rc | default(1) == 0), 'state': (((compliance_state.stdout | default('{}') | trim) | from_json) | combine({'packages': (chocolatey_state.ansible_facts.ansible_chocolatey.packages | default([]))})) } | to_nice_json }}"
+      delegate_to: localhost
+      failed_when: false

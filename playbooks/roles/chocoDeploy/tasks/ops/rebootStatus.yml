@@ -1,0 +1,90 @@
+---
+# rebootStatus.yml
+# Checks common Windows pending-reboot markers after inventory collection.
+#
+# Reasons are classified Hard vs Soft so the run reports them appropriately:
+#
+#   HARD reasons genuinely block or risk MSI/installer operations:
+#     - CBS:RebootPending           (servicing stack wants a reboot;
+#                                    new MSI installs can fail or leave
+#                                    the host broken)
+#     - SCM:UpdateExeVolatile        (mid-install marker; another
+#                                    installer is racing or crashed)
+#     - ComputerName:RenamePending   (active vs target name differ;
+#                                    breaks anything that resolves
+#                                    machine name at install time)
+#
+#   SOFT reasons are informational and DO NOT block normal installs:
+#     - WU:RebootRequired            (WU has staged work; compounds the
+#                                    servicing backlog but does not
+#                                    block third-party installs)
+#     - SessionMgr:PendingFileRenameOperations  (queued renames from a
+#                                    prior install. Most apps -- Docker
+#                                    Desktop especially -- leave PFRO
+#                                    on every install. Routine and safe.)
+#
+# Hard reasons are recorded in choco_deploy_report_errors and trigger the
+# existing skip-on-pending-reboot opt-in gate.
+# Soft reasons are recorded in choco_deploy_report_advisories.reboot[]
+# (note the .advisories block on the JSON report) so they do not inflate
+# summary.errors.
+
+- name: rebootStatus | Upload reboot-status checker
+  ansible.windows.win_copy:
+    src: "{{ role_path }}/files/check_reboot_status.ps1"
+    dest: 'C:/Windows/Temp/check_reboot_status.ps1'
+  changed_when: false
+
+- name: rebootStatus | Check pending reboot indicators
+  ansible.windows.win_shell: '& "C:/Windows/Temp/check_reboot_status.ps1"'
+  register: init_reboot_check
+  changed_when: false
+  failed_when: false
+
+- name: rebootStatus | Parse reboot status
+  ansible.builtin.set_fact:
+    init_reboot_status: "{{ (init_reboot_check.stdout | default('{\"PendingReboot\":false,\"Reasons\":[],\"HardReasons\":[],\"SoftReasons\":[],\"Hard\":false,\"Actionable\":false}')) | from_json }}"
+  changed_when: false
+
+- name: rebootStatus | Emit pending reboot advisory
+  ansible.builtin.debug:
+    msg: >-
+      Pending reboot detected after inventory collection.
+      hard={{ init_reboot_status.HardReasons | default([]) }}
+      soft={{ init_reboot_status.SoftReasons | default([]) }}
+      target_software={{ choco_selected_apps | default([]) | map(attribute='key') | list }}
+      detected_existing_software={{ (detected_managed_apps | default([]) | map(attribute='key') | list) if (detected_managed_apps is defined) else 'not-evaluated' }}
+  when: init_reboot_status.PendingReboot | default(false) | bool
+  changed_when: false
+
+- name: rebootStatus | Record HARD pending-reboot reason as error
+  ansible.builtin.set_fact:
+    choco_deploy_report_errors: >-
+      {{
+        choco_deploy_report_errors
+        + [
+            {
+              'software': 'system-state',
+              'operation': 'pending-reboot-hard',
+              'message': 'Hard pending reboot detected -- new installs may fail. Reasons=' ~ ((init_reboot_status.HardReasons | default([])) | join(', '))
+            }
+          ]
+      }}
+  when: (init_reboot_status.HardReasons | default([]) | length) > 0
+  changed_when: false
+
+- name: rebootStatus | Record SOFT pending-reboot reasons as advisory
+  ansible.builtin.set_fact:
+    choco_deploy_report_advisory_reboot: >-
+      {{
+        (choco_deploy_report_advisory_reboot | default([]))
+        + [
+            {
+              'category': 'pending-reboot-soft',
+              'message': 'Soft pending reboot indicators present. Reasons=' ~ ((init_reboot_status.SoftReasons | default([])) | join(', ')),
+              'reasons': (init_reboot_status.SoftReasons | default([]))
+            }
+          ]
+      }}
+  when: (init_reboot_status.SoftReasons | default([]) | length) > 0
+  changed_when: false

@@ -1,0 +1,133 @@
+---
+# Resolve the removal subset for this run.
+# Sentinel semantics:
+#   removeSoftware is null/unset -> process the full default removal catalog
+#                                   (legacy alwaysRemoveSoftware still honored as a
+#                                   compatibility shim)
+#   removeSoftware == []         -> explicitly skip the removal pass
+#   removeSoftware is non-empty  -> remove only the listed catalog ids / aliases /
+#                                   ad-hoc choco ids
+
+- name: removeSelection | Build remove token map
+  ansible.builtin.set_fact:
+    _remove_software_provided: "{{ removeSoftware is not none }}"
+    remove_software_input: >-
+      {{
+        (removeSoftware | default([], true))
+        if (removeSoftware is not none)
+        else (alwaysRemoveSoftware | default([]))
+      }}
+    remove_software_normalized: []
+    choco_remove_token_map: >-
+      {%- set m = {} -%}
+      {%- for entry in (choco_always_remove_catalog | default([])) -%}
+        {%- set _ = m.update({(entry.key | lower): entry.key}) -%}
+        {%- for a in (entry.aliases | default([])) -%}
+          {%- set _ = m.update({(a | lower): entry.key}) -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {%- for entry in (choco_managed_apps | default([])) -%}
+        {%- if m[entry.key | lower] is not defined -%}
+          {%- set _ = m.update({(entry.key | lower): entry.key}) -%}
+          {%- for a in (entry.aliases | default([])) -%}
+            {%- if m[a | lower] is not defined -%}
+              {%- set _ = m.update({(a | lower): entry.key}) -%}
+            {%- endif -%}
+          {%- endfor -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ m }}
+  changed_when: false
+
+- name: removeSelection | Normalize remove entries
+  ansible.builtin.set_fact:
+    remove_software_normalized: >-
+      {{
+        remove_software_normalized
+        + [
+            (
+              {
+                'requested_key': (item | lower),
+                'key': (choco_remove_token_map[item | lower] | default(item | lower))
+              }
+              if (item is string)
+              else {
+                'requested_key': (item.key | lower),
+                'key': (choco_remove_token_map[item.key | lower] | default(item.key | lower))
+              }
+            )
+          ]
+      }}
+  loop: "{{ remove_software_input | default([]) }}"
+  loop_control:
+    label: "{{ item if (item is string) else (item.key | default('invalid-remove-target')) }}"
+  when:
+    - item is string or item is mapping
+    - (item is string) or (item.key is defined)
+  changed_when: false
+
+- name: removeSelection | Validate remove input shape
+  ansible.builtin.assert:
+    that:
+      - item is string or item is mapping
+      - (item is string) or (item.key is defined)
+    fail_msg: >-
+      removeSelection: each removeSoftware entry must be either a string
+      or a mapping with key. Got {{ item | to_nice_json }}
+    quiet: true
+  loop: "{{ remove_software_input | default([]) }}"
+  loop_control:
+    label: "{{ item if (item is string) else (item.key | default('invalid-remove-target')) }}"
+  changed_when: false
+
+- name: removeSelection | Build selected removal ids
+  ansible.builtin.set_fact:
+    choco_selected_remove_ids: >-
+      {{
+        (
+          (remove_software_normalized | map(attribute='key') | list)
+          if (_remove_software_provided | bool)
+          else (choco_always_remove_catalog | default([]) | map(attribute='key') | list)
+        )
+        | unique
+        | list
+      }}
+    choco_known_remove_ids: "{{ choco_always_remove_catalog | default([]) | map(attribute='key') | list }}"
+    choco_known_remove_tokens: "{{ choco_remove_token_map.keys() | list | sort }}"
+  changed_when: false
+
+- name: removeSelection | Split catalog vs ad-hoc removal ids
+  ansible.builtin.set_fact:
+    choco_selected_remove_catalog_ids: >-
+      {{ choco_selected_remove_ids | intersect(choco_known_remove_ids) | list }}
+    choco_selected_remove_adhoc_ids: >-
+      {{ choco_selected_remove_ids | difference(choco_known_remove_ids) | list }}
+  changed_when: false
+
+- name: removeSelection | Build selected removal catalog
+  ansible.builtin.set_fact:
+    choco_selected_remove_items: >-
+      {%- set items = (choco_always_remove_catalog | default([]) | selectattr('key', 'in', choco_selected_remove_catalog_ids) | list) -%}
+      {%- set managed_map = {} -%}
+      {%- for app in (choco_managed_apps | default([])) -%}
+        {%- set _ = managed_map.update({app.key: app}) -%}
+      {%- endfor -%}
+      {%- for adhoc_id in choco_selected_remove_adhoc_ids -%}
+        {%- if managed_map[adhoc_id] is defined -%}
+          {%- set _ = items.append(managed_map[adhoc_id]) -%}
+        {%- else -%}
+          {%- set _ = items.append({'key': adhoc_id, 'detect_packages': [adhoc_id], 'registry_patterns': [], 'aliases': []}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ items }}
+  changed_when: false
+
+- name: removeSelection | Summary
+  ansible.builtin.debug:
+    msg: >-
+      removeSelection:
+      mode={{ 'filter' if _remove_software_provided else 'default-catalog' }},
+      selected={{ choco_selected_remove_items | map(attribute='key') | list }},
+      requested={{ remove_software_normalized | map(attribute='requested_key') | list }}
+  when: choco_deploy_console_verbose | default(false) | bool
+  changed_when: false

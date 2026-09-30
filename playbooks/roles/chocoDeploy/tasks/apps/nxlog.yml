@@ -1,0 +1,8 @@
+---
+- name: Apps | Align nxlog
+  ansible.builtin.include_tasks: ops/install-one.yml
+  vars:
+    pkg:
+      name: nxlog
+      version: "{{ choco_target_min_version_map[app_catalog_item.key] | default(acceptable_versions.applications.nxlog.min_version) }}"
+      registry_patterns: "{{ app_catalog_item.registry_patterns | default(['^nxlog']) }}"

@@ -1,0 +1,110 @@
+# ops/preflight.yml -- sysPatch
+#
+# Runbook steps 0 and 1. Confirms the host is reachable, has headroom, is not
+# in use, and that a reboot is authorized before any patching starts. Failing
+# here costs nothing. Failing after Windows Update has run costs a window.
+
+- name: preflight | Confirm the reboot authorization before any patching
+  ansible.builtin.assert:
+    that:
+      - syspatch_allow_reboot | bool
+      - inventory_hostname_short in (syspatch_reboot_allowed_hosts | default([]))
+    fail_msg: >-
+      maintenance=full reboots {{ inventory_hostname }} and the reboot is not
+      authorized. Both gates must be satisfied. Pass -e "syspatch_allow_reboot=true"
+      and add '{{ inventory_hostname_short }}' to syspatch_reboot_allowed_hosts in
+      the inventory group_vars. Checked before patching so a blocked reboot never
+      strands a half-patched host.
+    quiet: true
+  when: _sp_will_reboot | bool
+
+- name: preflight | Confirm WinRM answers
+  ansible.windows.win_ping:
+
+- name: preflight | Ensure the report directory exists on the target
+  ansible.windows.win_file:
+    path: "{{ syspatch_report_dir_remote }}"
+    state: directory
+
+- name: preflight | Upload preflight_state.ps1
+  ansible.windows.win_copy:
+    src: preflight_state.ps1
+    dest: "{{ _sp_remote_dir_fs }}/preflight_state.ps1"
+  changed_when: false
+
+- name: preflight | Collect pre-change host state
+  ansible.windows.win_shell: '& "{{ _sp_remote_dir_fs }}/preflight_state.ps1"'
+  register: _sp_preflight_raw
+  changed_when: false
+
+- name: preflight | Parse pre-change host state
+  ansible.builtin.set_fact:
+    sp_preflight: "{{ _sp_preflight_raw.stdout | from_json }}"
+  failed_when: sp_preflight is not mapping
+
+- name: preflight | Show the pre-change state
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}]
+      {{ sp_preflight.manufacturer }} {{ sp_preflight.model }}
+      tag={{ sp_preflight.service_tag }}
+      os={{ sp_preflight.os_caption }} build={{ sp_preflight.os_build }}
+      uptime={{ sp_preflight.uptime_days }}d
+      disk_free={{ sp_preflight.disk_free_gb }}GB
+      pending_reboot={{ sp_preflight.reboot_pending }}{{ ' (actionable)' if (sp_preflight.reboot_actionable | bool) else '' }}
+      sessions={{ sp_preflight.session_count }}
+
+- name: preflight | Require free space on C
+  ansible.builtin.assert:
+    that:
+      - (sp_preflight.disk_free_gb | float) >= (syspatch_min_free_gb | float)
+    fail_msg: >-
+      {{ inventory_hostname }} has {{ sp_preflight.disk_free_gb }}GB free on C:,
+      below the {{ syspatch_min_free_gb }}GB required to patch safely. Clear
+      space first. A disk that fills during Windows Update is the worst outcome
+      available here.
+    quiet: true
+  when: (syspatch_min_free_gb | int) > 0
+
+- name: preflight | Warn about interactive logon sessions
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}] {{ sp_preflight.session_count }} interactive
+      session(s) present: {{ sp_preflight.sessions | map(attribute='user') | join(', ') }}
+  when: (sp_preflight.session_count | int) > 0
+
+# prestage never blocks on this. Downloading updates interrupts nobody, so a
+# signed-in user is information rather than an obstacle.
+- name: preflight | Stop when someone is still signed in
+  ansible.builtin.assert:
+    that:
+      - (sp_preflight.session_count | int) == 0
+    fail_msg: >-
+      {{ inventory_hostname }} has {{ sp_preflight.session_count }} interactive
+      session(s): {{ sp_preflight.sessions | map(attribute='user') | join(', ') }}.
+      Confirm with the application owner and authorized operators that the work is
+      finished, then re-run. Override with -e "syspatch_block_on_active_sessions=false"
+      if the sessions are known to be idle.
+    quiet: true
+  when:
+    - _sp_installs | bool
+    - syspatch_block_on_active_sessions | bool
+    - (sp_preflight.session_count | int) > 0
+
+- name: preflight | Record the preflight event
+  ansible.builtin.set_fact:
+    sp_events: >-
+      {{
+        sp_events + [{
+          'phase': 'preflight',
+          'action': 'Checked',
+          'result': 'ok',
+          'detail': (
+            sp_preflight.disk_free_gb | string ~ 'GB free; uptime ' ~
+            sp_preflight.uptime_days | string ~ 'd; ' ~
+            sp_preflight.session_count | string ~ ' session(s); pending_reboot=' ~
+            sp_preflight.reboot_pending | string
+          )
+        }]
+      }}
+  changed_when: false

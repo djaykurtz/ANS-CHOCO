@@ -1,0 +1,209 @@
+---
+- name: Patch readiness check
+  hosts: basic_hosts
+  gather_facts: false
+  ignore_unreachable: true
+  collections:
+    - community.windows
+
+  vars_files:
+    - "{{ playbook_dir }}/../vault/corp-ans-secret.yml"
+
+  vars:
+    patch_ready_output_dir: "{{ chocofleet_data_root }}/LOGS/patchReady"
+    patch_ready_report_name: "{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}_{{ (ansible_inventory_sources | default([]) | first | default('unknown') | basename | regex_replace('\\.ya?ml$', '')) }}_patchReady.html"
+    patch_ready_disk_threshold_gb: 5
+    patch_ready_log_cleanup_days: "{{ choco_deploy_local_report_retain_days | default(90) }}"
+    patch_ready_log_dir: 'C:\tools\chocolog'
+
+  tasks:
+    - name: patchReady | Test WinRM connectivity
+      ansible.windows.win_ping:
+      register: _pr_winrm
+      failed_when: false
+
+    - name: patchReady | Set WinRM status
+      ansible.builtin.set_fact:
+        _pr_winrm_ok: "{{ _pr_winrm.ping | default('') == 'pong' }}"
+        _pr_unreachable: "{{ _pr_winrm.unreachable | default(false) | bool }}"
+        _pr_winrm_error: "{{ _pr_winrm.msg | default('') }}"
+      changed_when: false
+
+    - name: patchReady | Test DNS resolution for unreachable hosts
+      ansible.builtin.command: "getent hosts {{ inventory_hostname }}"
+      register: _pr_dns
+      delegate_to: localhost
+      failed_when: false
+      changed_when: false
+      when: not (_pr_winrm_ok | bool)
+
+    - name: patchReady | Determine failure reason for unreachable hosts
+      ansible.builtin.set_fact:
+        _pr_fail_reason: >-
+          {{
+            'DNS resolution failed'
+            if ((_pr_dns.rc | default(0) | int) != 0)
+            else (
+              'WinRM auth failed'
+              if (_pr_winrm_error is search('(?i)auth|401|access|denied|credential'))
+              else (
+                'WinRM connection refused or timed out'
+                if (_pr_winrm_error is search('(?i)refused|reset|timeout|unreachable|No connection'))
+                else 'WinRM unreachable'
+              )
+            )
+          }}
+      when: not (_pr_winrm_ok | bool)
+      changed_when: false
+
+    - name: patchReady | Run system checks
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'SilentlyContinue'
+        $result = @{}
+
+        $result['hostname'] = $env:COMPUTERNAME
+
+        $pending = $false
+        $actionable = $false
+        $reasons = @()
+
+        if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending') {
+          $pending = $true; $actionable = $true; $reasons += 'CBS:RebootPending'
+        }
+        if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') {
+          $pending = $true; $actionable = $true; $reasons += 'WU:RebootRequired'
+        }
+        try {
+          $pfr = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
+          if ($pfr) { $pending = $true; $reasons += 'SessionMgr:PendingFileRename' }
+        } catch {}
+        try {
+          $active = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ActiveComputerName' -Name ComputerName -ErrorAction SilentlyContinue).ComputerName
+          $current = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName' -Name ComputerName -ErrorAction SilentlyContinue).ComputerName
+          if ($active -and $current -and $active -ne $current) { $pending = $true; $actionable = $true; $reasons += 'ComputerName:RenamePending' }
+        } catch {}
+
+        $result['reboot_pending'] = $pending
+        $result['reboot_actionable'] = $actionable
+        $result['reboot_reasons'] = $reasons
+
+        $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction SilentlyContinue
+        $result['disk_free_gb'] = [math]::Round($disk.FreeSpace / 1GB, 1)
+        $result['disk_total_gb'] = [math]::Round($disk.Size / 1GB, 1)
+
+        $chocoVer = ''
+        try { $chocoVer = (choco --version 2>&1).Trim() } catch {}
+        $result['choco_version'] = $chocoVer
+        $result['choco_ok'] = ($chocoVer -match '^\d+\.\d+')
+
+        $result['uptime_days'] = [math]::Round(((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalDays, 1)
+
+        $result | ConvertTo-Json -Compress
+      register: _pr_checks_raw
+      when: _pr_winrm_ok | bool
+      changed_when: false
+      failed_when: false
+
+    - name: patchReady | Parse system checks
+      ansible.builtin.set_fact:
+        _pr_checks: "{{ _pr_checks_raw.stdout | from_json }}"
+      when:
+        - _pr_winrm_ok | bool
+        - _pr_checks_raw.stdout is defined
+        - (_pr_checks_raw.stdout | default('') | trim | length) > 0
+      changed_when: false
+
+    - name: patchReady | Set default checks for unreachable hosts
+      ansible.builtin.set_fact:
+        _pr_checks:
+          hostname: "{{ inventory_hostname_short | default(inventory_hostname) }}"
+          reboot_pending: false
+          reboot_actionable: false
+          reboot_reasons: []
+          disk_free_gb: 0
+          disk_total_gb: 0
+          choco_version: ""
+          choco_ok: false
+          uptime_days: 0
+      when: _pr_checks is not defined
+      changed_when: false
+
+    - name: patchReady | Determine host readiness
+      ansible.builtin.set_fact:
+        _pr_status: >-
+          {{
+            'FAIL' if (not (_pr_winrm_ok | bool))
+            else (
+              'WARN' if (
+                (_pr_checks.reboot_actionable | default(false) | bool)
+                or ((_pr_checks.disk_free_gb | default(0) | float) < (patch_ready_disk_threshold_gb | float))
+                or (not (_pr_checks.choco_ok | default(false) | bool))
+              )
+              else 'READY'
+            )
+          }}
+        _pr_host_result:
+          host: "{{ inventory_hostname }}"
+          short_host: "{{ inventory_hostname.split('.')[0] }}"
+          domain: "{{ 'CORP' if (inventory_hostname is search('(?i)corp')) else ('INFRA' if (inventory_hostname is search('(?i)infra')) else '?') }}"
+          winrm: "{{ _pr_winrm_ok | bool }}"
+          fail_reason: "{{ _pr_fail_reason | default('') }}"
+          reboot_pending: "{{ _pr_checks.reboot_pending | default(false) }}"
+          reboot_actionable: "{{ _pr_checks.reboot_actionable | default(false) }}"
+          reboot_reasons: "{{ _pr_checks.reboot_reasons | default([]) }}"
+          disk_free_gb: "{{ _pr_checks.disk_free_gb | default(0) }}"
+          disk_total_gb: "{{ _pr_checks.disk_total_gb | default(0) }}"
+          choco_ok: "{{ _pr_checks.choco_ok | default(false) }}"
+          choco_version: "{{ _pr_checks.choco_version | default('') }}"
+          uptime_days: "{{ _pr_checks.uptime_days | default(0) }}"
+      changed_when: false
+
+    - name: patchReady | Display host status
+      ansible.builtin.debug:
+        msg: >-
+          {{ _pr_status }}:
+          host={{ inventory_hostname }};
+          winrm={{ _pr_winrm_ok }};
+          reboot={{ _pr_checks.reboot_pending | default(false) }}{{ ' (actionable)' if (_pr_checks.reboot_actionable | default(false) | bool) else '' }};
+          disk={{ _pr_checks.disk_free_gb | default(0) }}GB;
+          choco={{ _pr_checks.choco_version | default('missing') }}
+      changed_when: false
+
+    - name: patchReady | Clean old chocoDeploy logs on target
+      ansible.windows.win_shell: |
+        $retainDays = {{ patch_ready_log_cleanup_days }}
+        $logDir = '{{ patch_ready_log_dir }}'
+        if (-not (Test-Path $logDir)) { return }
+        $cutoff = (Get-Date).AddDays(-$retainDays)
+        $old = Get-ChildItem -Path $logDir -File | Where-Object {
+          $_.Name -match '^\d{8}T\d{6}Z_chocoDeploy' -and $_.LastWriteTime -lt $cutoff
+        }
+        $oldHtml = Get-ChildItem -Path $logDir -File | Where-Object {
+          $_.Name -match '^\d{8}_chocoDeploy\.html$' -and $_.LastWriteTime -lt $cutoff
+        }
+        $allOld = @($old) + @($oldHtml) | Where-Object { $_ -ne $null }
+        if ($allOld.Count -eq 0) { "Cleaned=0"; return }
+        $archiveDir = Join-Path $logDir 'archive'
+        if (-not (Test-Path $archiveDir)) { New-Item -ItemType Directory -Path $archiveDir -Force | Out-Null }
+        $zipName = (Get-Date -Format 'yyyyMMdd') + '_chocoDeploy_old_logs.zip'
+        $zipPath = Join-Path $archiveDir $zipName
+        $allOld | Compress-Archive -DestinationPath $zipPath -Update
+        $allOld | Remove-Item -Force -ErrorAction SilentlyContinue
+        "Cleaned=$($allOld.Count)"
+      when: _pr_winrm_ok | bool
+      changed_when: false
+      failed_when: false
+
+    - name: patchReady | Ensure CHECK directory exists
+      ansible.builtin.file:
+        path: "{{ patch_ready_output_dir }}"
+        state: directory
+      delegate_to: localhost
+      run_once: true
+
+    - name: patchReady | Write readiness report
+      ansible.builtin.template:
+        src: patchReady.html.j2
+        dest: "{{ patch_ready_output_dir }}/{{ patch_ready_report_name }}"
+      delegate_to: localhost
+      run_once: true

@@ -1,0 +1,104 @@
+# playbooks/roles/chocoBuild/files/internalize-spec.yml
+#
+# Catalog of approved Chocolatey packages to mirror locally. Mirror of
+# `acceptable_versions` in playbooks/roles/chocoDeploy/defaults/main.yml.
+# When a catalog version is bumped, update the matching entry here and
+# re-run playbooks/chocoBuild.yml --tags community.
+#
+# Notes:
+# - Each entry is `{ id, version }`. Versions are exact pins, not ranges.
+# - ROLLBACK-WINDOW standard (2026-07-20): keep future / current / previous per
+#   product (current == acceptable_versions floor). Only 2 entries when current
+#   is already the newest on the feed. Holding a version here only STAGES it on
+#   the mirror; acceptable_versions still gates what actually deploys.
+# - python312 catalog floor is 3.12.10 (matches what the public Chocolatey
+#   feed currently has -- 3.12.13 was pulled). If a newer 3.12.x security
+#   release lands, bump both the catalog and this spec together.
+# - powershell-core fleet floor is 7.6.3 (July 2026 policy, raised from 7.6.0).
+# - Stale floors bumped 2026-07-20 (git 2.55.0.3, vscode 1.129.1, pycharm
+#   2026.1.4, python313 3.13.14, python314 3.14.6) -- all validated on the solo
+#   host and now windowed.
+# - The mirror keeps multiple versions per package (each in its own
+#   subdirectory) so older versions remain available for rollback.
+
+choco_internalize_packages:
+  # ROLLBACK WINDOW per product (2026-07-20 standard): keep
+  #   future  = next release / candidate newer than current (only if one exists)
+  #   current = the deployed/approved version == acceptable_versions floor
+  #   previous = last working release before current
+  # Only 2 entries when current is already the newest on the feed (no future yet).
+  #
+  # Applications
+  # docker-desktop: WRAPPER package (vendor-binary swap via wrapper-spec.yml),
+  # NOT windowed here. Leave its base versions as-is.
+  - { id: 'docker-desktop',                    version: '4.64.0' }
+  - { id: 'docker-desktop',                    version: '4.75.0' }
+  # 7-Zip: current 26.2.0 is the feed newest -> current + previous only.
+  - { id: '7zip.install',                      version: '26.2.0' }   # current (floor)
+  - { id: '7zip.install',                      version: '26.1.0' }   # previous
+  # git: current 2.55.0.3 (feed newest) + previous. Meta-package on git.install.
+  - { id: 'git',                               version: '2.55.0.3' }  # current (floor)
+  - { id: 'git',                               version: '2.55.0.2' }  # previous
+  - { id: 'git.install',                       version: '2.55.0.3' }  # current (floor)
+  - { id: 'git.install',                       version: '2.55.0.2' }  # previous
+  - { id: 'greenshot',                         version: '1.3.315' }  # current (feed newest)
+  - { id: 'greenshot',                         version: '1.3.312' }  # previous
+  - { id: 'microsoft-teams-new-bootstrapper',  version: '1.0.2508703' }  # current (feed newest)
+  - { id: 'microsoft-teams-new-bootstrapper',  version: '1.0.2414501' }  # previous
+  # PyCharm 2026.2.2 remains a candidate only. The second TEST host retained
+  # a vendor registry entry after uninstall, so do not promote yet.
+  - { id: 'pycharm',                           version: '2026.2.2' }  # candidate
+  - { id: 'pycharm',                           version: '2026.2.1' }  # current floor
+  - { id: 'pycharm',                           version: '2026.1.4' }  # rollback
+  # PuTTY 0.85.0 remains a candidate. The second TEST host reports a vendor
+  # registry version 1.8.5, so the candidate install was not exercised there.
+  - { id: 'putty.install',                     version: '0.85.0' }   # candidate
+  - { id: 'putty.install',                     version: '0.84.0' }   # previous
+  - { id: 'putty.install',                     version: '0.83.0' }   # current floor
+  # Vim 9.2.1061 passed both TEST systems.
+  - { id: 'vim',                               version: '9.2.1061' } # current floor
+  - { id: 'vim',                               version: '9.2.1054' } # previous
+  - { id: 'vim',                               version: '9.2.810' }  # rollback
+  # VS Code self-updater drift was found on TEST solo. The public feed has
+  # 1.137.0, but use stable-minus-one 1.136.2 as the candidate so the pin is
+  # close to current without chasing the newest self-updater release. A host
+  # already at 1.137.0 remains compliant because deployment floors do not
+  # downgrade newer registry versions.
+  - { id: 'vscode.install',                    version: '1.136.2' }   # candidate current
+  - { id: 'vscode.install',                    version: '1.129.1' }   # current (floor)
+  - { id: 'vscode.install',                    version: '1.129.0' }   # previous
+  - { id: 'winscp.install',                    version: '6.5.6' }    # future
+  - { id: 'winscp.install',                    version: '6.5.5' }    # current (floor)
+  - { id: 'winscp.install',                    version: '6.5.4' }    # previous
+  # nxlog: single version only -- feed hasn't updated since 8 May 2023, and
+  # our vendor .msi (nxlog-ce-3.2.2329.msi) matches the feed's current build
+  # exactly. No rollback window until the feed actually publishes a newer one.
+  - { id: 'nxlog',                             version: '3.2.2329' }  # current (floor, feed newest)
+  # Azure CLI -- community pkg pulls the official MSI from
+  # azcliprod.blob.core.windows.net; internalize bundles that official binary.
+  - { id: 'azure-cli',                         version: '2.88.0' }   # current (feed newest)
+  - { id: 'azure-cli',                         version: '2.87.0' }   # previous
+  # Python runtimes (side-by-side)
+  - { id: 'python312',                         version: '3.12.10' }  # current (floor, 3.12 newest)
+  - { id: 'python312',                         version: '3.12.9' }   # previous
+  # python313 / python314: current (feed newest) + previous.
+  - { id: 'python313',                         version: '3.13.14' }   # current (floor)
+  - { id: 'python313',                         version: '3.13.13' }   # previous
+  - { id: 'python314',                         version: '3.14.6' }    # current (floor)
+  - { id: 'python314',                         version: '3.14.5' }    # previous
+  # .NET runtime candidates passed both TEST systems 2026-09-15.
+  - { id: 'dotnet-8.0-aspnetruntime',          version: '8.0.31' }   # current floor
+  - { id: 'dotnet-8.0-aspnetruntime',          version: '8.0.30' }   # previous
+  - { id: 'dotnet-8.0-aspnetruntime',          version: '8.0.29' }   # rollback
+  - { id: 'dotnet-9.0-aspnetruntime',          version: '9.0.20' }   # current floor
+  - { id: 'dotnet-9.0-aspnetruntime',          version: '9.0.19' }   # previous
+  - { id: 'dotnet-9.0-aspnetruntime',          version: '9.0.18' }   # rollback
+  - { id: 'dotnet-10.0-aspnetruntime',         version: '10.0.12' }  # current floor
+  - { id: 'dotnet-10.0-aspnetruntime',         version: '10.0.11' }  # previous
+  - { id: 'dotnet-10.0-aspnetruntime',         version: '10.0.10' }  # rollback
+  # PowerShell Core 7.6.6 passed both TEST systems 2026-09-15.
+  - { id: 'powershell-core',                   version: '7.6.6' }    # current floor
+  - { id: 'powershell-core',                   version: '7.6.5' }    # previous
+  - { id: 'powershell-core',                   version: '7.6.4' }    # rollback
+  # .NET Framework: in-box, only ~2 feed builds -> excluded from windowing.
+  - { id: 'netfx-4.8.1',                       version: '4.8.1.20250219' }

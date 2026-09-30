@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chocoDeploy: Ansible playbook builder</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header>
+  <div class="header-row">
+    <h1>chocoDeploy: Ansible playbook builder</h1>
+    <div class="header-meta">
+      <button id="refresh-btn" class="refresh-btn" title="Reload catalog and inventories (preserves your selections)">Refresh</button>
+      <span id="health-indicator" class="health-dot health-unknown" title="Checking server health..."></span>
+      <span class="meta-pill">local demo</span>
+    </div>
+  </div>
+</header>
+
+<div id="staleness-banner" class="staleness-banner">
+  <span id="staleness-text">Files on disk changed.</span>
+  <button id="staleness-reload-btn">Reload now</button>
+  <button id="staleness-dismiss-btn">Dismiss</button>
+</div>
+
+<div class="layout">
+
+  <!-- ============================================================ -->
+  <!-- SIDEBAR: inventory module                                    -->
+  <!-- ============================================================ -->
+  <aside class="sidebar">
+    <div class="sb-header">
+      <h2>Inventory</h2>
+      <div class="sb-tabs">
+        <button class="tab-btn active" data-tab="browse">Browse</button>
+        <button class="tab-btn" data-tab="build">Build new</button>
+      </div>
+    </div>
+
+    <!-- Browse pane -->
+    <div class="tab-pane active" data-pane="browse">
+      <div class="sb-section">
+        <label class="sb-label">Available inventories</label>
+        <select id="inv-select" size="10" class="inv-list"></select>
+      </div>
+
+      <div class="sb-section">
+        <div class="sb-row">
+          <label class="sb-label">Hosts in selected inventory</label>
+          <div class="sb-row-actions">
+            <button id="inv-export-btn"  class="btn btn-ghost btn-sm" title="Download YAML">Export</button>
+            <button id="inv-ping-all-btn" class="btn btn-ghost btn-sm" title="ansible win_ping all">Ping all</button>
+          </div>
+        </div>
+        <div id="host-list" class="host-list">
+          <p class="hint">Select an inventory to view hosts.</p>
+        </div>
+      </div>
+
+      <div class="sb-section">
+        <button id="use-inventory-btn" class="btn btn-primary btn-block" disabled>
+          Use this inventory in builder >>
+        </button>
+      </div>
+    </div>
+
+    <!-- Build pane -->
+    <div class="tab-pane" data-pane="build">
+      <div class="sb-section">
+        <label class="sb-label" for="new-inv-name">New inventory name</label>
+        <input type="text" id="new-inv-name" placeholder="adhoc-myrun" pattern="[A-Za-z0-9_\-]+">
+        <p class="hint">Saved as <code>inventory/Adhoc/inv-&lt;name&gt;.yml</code></p>
+      </div>
+
+      <div class="sb-section">
+        <label class="sb-label" for="new-inv-group">Group name</label>
+        <input type="text" id="new-inv-group" value="basic_hosts" pattern="[A-Za-z0-9_\-]+">
+      </div>
+
+      <div class="sb-section">
+        <label class="sb-label" for="new-inv-hosts">Hosts (one per line)</label>
+        <textarea id="new-inv-hosts" rows="8" placeholder="test-host-01.corp.example.com&#10;fleet-host-05.corp.example.com"></textarea>
+      </div>
+
+      <div class="sb-section">
+        <div class="sb-row">
+          <button id="save-inv-btn"     class="btn btn-primary">Save to repo</button>
+          <button id="download-inv-btn" class="btn btn-ghost">Download YAML</button>
+        </div>
+        <p id="save-inv-msg" class="hint"></p>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============================================================ -->
+  <!-- MAIN: command builder                                        -->
+  <!-- ============================================================ -->
+  <main class="main">
+
+    <!-- Step 1: target -->
+    <section class="step" data-step="target">
+      <h2><span class="step-num">1</span> Target <span class="chevron">v</span></h2>
+      <p class="step-desc" data-step-desc="target"></p>
+      <div class="step-body grid-two">
+        <div>
+          <label class="form-label" for="inventory-path">Inventory <code>-i</code></label>
+          <input type="text" id="inventory-path" placeholder="inventory/TEST/inv-TEST.yml">
+          <p class="field-help" data-field-help="inventory"></p>
+        </div>
+        <div>
+          <label class="form-label" for="limit-pattern">Limit <code>-l</code></label>
+          <input type="text" id="limit-pattern" placeholder="basic_hosts or hostname or pattern*">
+          <p class="field-help" data-field-help="limit"></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 2: mode -->
+    <section class="step" data-step="mode">
+      <h2><span class="step-num">2</span> Deployment mode <span class="chevron">v</span></h2>
+      <p class="step-desc" data-step-desc="mode"></p>
+      <div id="mode-picker" class="mode-grid"></div>
+      <p class="step-detail" id="mode-detail"></p>
+    </section>
+
+    <!-- Step 3: apps -->
+    <section class="step" data-step="apps">
+      <h2>
+        <span class="step-num">3</span> Apps
+        <span class="step-sub">(targetSoftware)</span>
+        <span class="chevron">v</span>
+      </h2>
+      <p class="step-desc" data-step-desc="apps"></p>
+      <div id="apps-mode-radios" class="radio-block"></div>
+      <p class="field-help" data-field-help="app_filter"></p>
+      <div id="app-picker" class="app-grid"></div>
+    </section>
+
+    <!-- Step 4: removals -->
+    <section class="step" data-step="removals">
+      <h2>
+        <span class="step-num">4</span> Removals
+        <span class="step-sub">(removeSoftware)</span>
+        <span class="chevron">v</span>
+      </h2>
+      <p class="step-desc" data-step-desc="removals"></p>
+      <div id="rm-mode-radios" class="radio-block"></div>
+      <div id="rm-picker" class="rm-grid"></div>
+      <div class="form-row form-row-block">
+        <label class="form-label" for="rm-adhoc">Ad-hoc removal <code>(choco package ids, comma- or newline-separated)</code></label>
+        <textarea id="rm-adhoc" rows="2" placeholder="some-unwanted-package, another-mistake"></textarea>
+        <p class="field-help" data-field-help="rm_adhoc"></p>
+      </div>
+    </section>
+
+    <!-- Step 5: runtimes -->
+    <section class="step" data-step="runtimes">
+      <h2>
+        <span class="step-num">5</span> Runtimes
+        <span class="step-sub">(targetRuntimes - off by default)</span>
+        <span class="chevron">v</span>
+      </h2>
+      <p class="step-desc" data-step-desc="runtimes"></p>
+      <div id="runtime-picker" class="runtime-grid"></div>
+    </section>
+
+    <!-- Step 6: flags -->
+    <section class="step" data-step="flags">
+      <h2><span class="step-num">6</span> Flags <span class="chevron">v</span></h2>
+      <p class="step-desc" data-step-desc="flags"></p>
+
+      <div class="flag-block">
+        <label class="form-label" for="reboot-policy">Reboot policy <code>choco_deploy_reboot</code></label>
+        <select id="reboot-policy"></select>
+        <p class="field-help" id="reboot-detail"></p>
+      </div>
+
+      <div class="flag-block">
+        <label class="form-label">Force-replace orphan installs</label>
+        <div id="force-orphan-flags" class="flag-list"></div>
+      </div>
+
+      <div class="flag-block">
+        <label class="form-label">Other flags</label>
+        <div id="common-flags" class="flag-list"></div>
+      </div>
+
+      <div class="flag-block grid-two">
+        <div>
+          <label class="form-label" for="forks">Parallelism <code>-f</code> (forks)</label>
+          <input type="number" id="forks" min="1" max="200" placeholder="(default: ansible.cfg, 25)">
+          <p class="field-help" data-field-help="forks"></p>
+        </div>
+        <div>
+          <label class="form-label" for="tags">Tags <code>--tags</code></label>
+          <input type="text" id="tags" placeholder="e.g. choco_init">
+          <p class="field-help" data-field-help="tags"></p>
+        </div>
+      </div>
+
+      <div class="flag-block">
+        <label class="form-label" for="extra-vars-free">Extra raw <code>-e</code> args (one per line)</label>
+        <textarea id="extra-vars-free" rows="2" placeholder='choco_deploy_reset_daily=true'></textarea>
+        <p class="field-help" data-field-help="extra_raw"></p>
+      </div>
+    </section>
+
+    <!-- Output -->
+    <section class="step step-output" data-step="command">
+      <h2><span class="step-num">*</span> Command <span class="chevron">v</span></h2>
+      <div class="cmd-controls">
+        <label><input type="checkbox" id="multiline-toggle" checked> Multi-line (backslash continuations)</label>
+        <button id="copy-cmd-btn"    class="btn btn-primary">Copy command</button>
+        <button id="copy-cmd-1l-btn" class="btn btn-ghost">Copy single-line</button>
+        <button id="reset-btn"       class="btn btn-ghost">Reset all</button>
+      </div>
+      <pre id="cmd-out" class="command">(builder is initializing...)</pre>
+      <div id="cmd-warnings" class="warnings"></div>
+    </section>
+
+  </main>
+</div>
+
+<footer>
+  <span>chocoDeploy: Ansible playbook builder | local-only | no ansible is executed by this UI (except <code>win_ping</code> for inventory probing)</span>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

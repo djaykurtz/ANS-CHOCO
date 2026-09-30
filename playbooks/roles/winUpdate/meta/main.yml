@@ -1,0 +1,15 @@
+galaxy_info:
+  role_name: winUpdate
+  author: choco-fleet
+  description: >
+    Windows Update alignment for Windows hosts. Scans for approved update
+    categories, optionally installs them, and reports what was found, what was
+    applied, and whether a reboot is outstanding. Audit-only by default. Runs
+    standalone or as a phase inside a larger maintenance role.
+  license: internal
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Windows
+      versions:
+        - all
+dependencies: []

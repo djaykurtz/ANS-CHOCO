@@ -1,0 +1,8 @@
+---
+- name: Apps | Align azure-cli
+  ansible.builtin.include_tasks: ops/install-one.yml
+  vars:
+    pkg:
+      name: azure-cli
+      version: "{{ choco_target_min_version_map[app_catalog_item.key] | default(acceptable_versions.applications.azure_cli.min_version) }}"
+      registry_patterns: "{{ app_catalog_item.registry_patterns | default(['^Microsoft CLI 2\\.0 for Azure', '^Microsoft Azure CLI']) }}"

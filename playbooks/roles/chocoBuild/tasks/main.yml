@@ -1,0 +1,52 @@
+---
+# playbooks/roles/chocoBuild/tasks/main.yml
+#
+# chocoBuild dispatcher. Selects which task sub-tree to run based on
+# the `chocoBuild_action` variable. Most callers will invoke a specific
+# sub-task via include_tasks from a top-level playbook rather than
+# rely on this dispatcher, but the dispatcher exists for completeness
+# and to validate the parameter shape.
+#
+# Supported actions:
+#   iterate_extract   - unpack a staged .nupkg on a TEST host
+#   iterate_repack    - repack a workdir back into a .nupkg
+#   iterate_install   - run choco install/upgrade against the local stage
+#   source_community  - internalize from chocolatey community feed (Phase 4)
+#   source_wrapper    - clone-prior-version + swap binary (Phase 4)
+#   source_firstparty - author from vendor URL + template (Phase 6)
+#   inspect_classify  - dry-run: which install-script family is this pkg
+
+- name: chocoBuild | Validate action
+  ansible.builtin.assert:
+    that:
+      - chocoBuild_action is defined
+      - chocoBuild_action in [
+          'iterate_extract',
+          'iterate_repack',
+          'iterate_install',
+          'source_community',
+          'source_wrapper',
+          'source_firstparty',
+          'inspect_classify',
+        ]
+    fail_msg: >-
+      chocoBuild requires `chocoBuild_action` to be one of:
+      iterate_extract, iterate_repack, iterate_install,
+      source_community, source_wrapper, source_firstparty,
+      inspect_classify. Got: {{ chocoBuild_action | default('<unset>') }}
+
+- name: chocoBuild | Dispatch to action sub-task
+  ansible.builtin.include_tasks: "{{ _chocoBuild_action_file }}"
+  vars:
+    _chocoBuild_action_file: >-
+      {{
+        {
+          'iterate_extract':   'iterate/extract-on-target.yml',
+          'iterate_repack':    'iterate/repack-on-target.yml',
+          'iterate_install':   'iterate/install-on-target.yml',
+          'source_community':  'source/community.yml',
+          'source_wrapper':    'source/wrapper.yml',
+          'source_firstparty': 'source/firstparty.yml',
+          'inspect_classify':  'inspect/classify-family.yml',
+        }[chocoBuild_action]
+      }}

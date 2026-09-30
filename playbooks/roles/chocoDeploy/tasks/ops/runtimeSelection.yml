@@ -1,0 +1,93 @@
+---
+# Resolve the runtime subset for this run.
+# Default: no runtime alignment.
+# If targetRuntimes is provided: only target those runtime ids.
+
+- name: runtimeSelection | Initialize normalized target runtime list
+  ansible.builtin.set_fact:
+    target_runtimes_normalized: []
+  changed_when: false
+
+- name: runtimeSelection | Normalize target runtime entries
+  ansible.builtin.set_fact:
+    target_runtimes_normalized: >-
+      {{
+        target_runtimes_normalized + [
+          (
+            {'key': item}
+            if (item is string)
+            else {
+              'key': item.key,
+              'package_name': (item.package_name | default('')),
+              'family': (item.family | default('')),
+              'track': (item.track | default('')),
+              'tracks': (item.tracks | default([])),
+              'min_version': (item.min_version | default('')),
+              'channels': (item.channels | default({})),
+              'min_supported_track': (item.min_supported_track | default('')),
+              'floor_required': (item.floor_required | default(false)),
+              'exclusive': (item.exclusive | default(false))
+            }
+          )
+        ]
+      }}
+  loop: "{{ targetRuntimes | default([]) }}"
+  loop_control:
+    label: "{{ item if (item is string) else (item.key | default('invalid-runtime')) }}"
+  when:
+    - item is string or item is mapping
+    - (item is string) or (item.key is defined)
+  changed_when: false
+
+- name: runtimeSelection | Validate target runtime input shape
+  ansible.builtin.assert:
+    that:
+      - item is string or item is mapping
+      - (item is string) or (item.key is defined)
+    fail_msg: >-
+      runtimeSelection: each targetRuntimes entry must be either a runtime id string
+      or a mapping with key and optional overrides. Got {{ item | to_nice_json }}
+    quiet: true
+  loop: "{{ targetRuntimes | default([]) }}"
+  loop_control:
+    label: "{{ item if (item is string) else (item.key | default('invalid-runtime')) }}"
+  changed_when: false
+
+- name: runtimeSelection | Build selected runtime ids
+  ansible.builtin.set_fact:
+    choco_known_runtime_ids: "{{ acceptable_versions.runtimes.keys() | list }}"
+    choco_selected_runtime_ids: "{{ target_runtimes_normalized | map(attribute='key') | list | unique | list }}"
+  changed_when: false
+
+- name: runtimeSelection | Validate requested runtime ids
+  ansible.builtin.assert:
+    that:
+      - (choco_selected_runtime_ids | difference(choco_known_runtime_ids) | length) == 0
+    fail_msg: >-
+      runtimeSelection: unknown runtime ids requested: {{ choco_selected_runtime_ids | difference(choco_known_runtime_ids) }}.
+      Valid ids: {{ choco_known_runtime_ids }}
+    quiet: true
+  when: (choco_selected_runtime_ids | length) > 0
+  changed_when: false
+
+- name: runtimeSelection | Initialize runtime override map
+  ansible.builtin.set_fact:
+    choco_target_runtime_map: {}
+  changed_when: false
+
+- name: runtimeSelection | Build runtime override map
+  ansible.builtin.set_fact:
+    choco_target_runtime_map: "{{ choco_target_runtime_map | combine({ item.key: item }) }}"
+  loop: "{{ target_runtimes_normalized }}"
+  loop_control:
+    label: "{{ item.key }}"
+  changed_when: false
+
+- name: runtimeSelection | Summary
+  ansible.builtin.debug:
+    msg: >-
+      runtimeSelection:
+      selected_runtimes={{ choco_selected_runtime_ids }},
+      overrides={{ choco_target_runtime_map }}
+  when: choco_deploy_console_verbose | default(false) | bool
+  changed_when: false

@@ -1,0 +1,101 @@
+---
+# playbooks/roles/chocoBuild/files/wrapper-spec.yml
+#
+# Catalog of wrapper packages to synthesize on the mirror. A "wrapper"
+# is a Chocolatey .nupkg we build OURSELVES by cloning an already-
+# internalized BASE version of a package and swapping in a newer (or
+# different) vendor installer binary. The new binary is downloaded
+# from the OFFICIAL vendor URL and verified against an OFFICIAL
+# SHA256 hash (either parsed out of a vendor-published checksums file
+# or pinned directly here).
+#
+# Use a wrapper when:
+#   1. The version you need is not yet on the Chocolatey community feed
+#      (e.g. docker-desktop 4.76, released by Docker before community
+#      picked it up).
+#   2. The community package has been delisted or sits stale, but the
+#      vendor binary itself is still publicly available.
+#   3. You want a controlled, hash-verified rebuild of a known-good
+#      community install script with a newer binary swapped in.
+#
+# Pipeline (executed by tasks/source/wrapper.yml against the spec):
+#   1. Re-extract `<id>.<base_version>.nupkg` into a temp staging dir
+#   2. Find the bundled installer in tools/files/ matching installer_glob
+#   3. Verify the new binary's SHA256 against either:
+#        a) checksums_url + checksums_match (line-match pattern)
+#        b) expected_sha256 (operator-pinned hash)
+#   4. Download new installer to the same tools/files path
+#   5. Bump <version> in the .nuspec, strip .signature.p7s
+#   6. Repack with forward-slash entry names (NuGet-valid)
+#   7. Write sentinel: <repo>/<id>/.internalized/<new_version>.done
+#
+# Adding a new wrapper:
+#   - Internalize the base version first via --tags community (so a
+#     bundled .nupkg exists to clone from).
+#   - Add an entry below with the seven required fields.
+#   - Run `ansible-playbook playbooks/chocoBuild.yml \
+#         -i inventory/Internalize/inv-internalize.yml \
+#         --vault-password-file=vault/.vault_key.txt --tags wrapper`
+#
+# Field reference:
+#   id                  Chocolatey package id (e.g. 'docker-desktop')
+#   base_version        Version already internalized on the mirror that
+#                       we clone. Must be present in chocoRepo/<id>/.
+#   base_nupkg_sha256   (RECOMMENDED) Pinned SHA256 of the cached base
+#                       .nupkg on the mirror. Acts as a supply-chain
+#                       guard: the helper aborts if the cached base
+#                       has been tampered with (catches a poisoned
+#                       community feed or compromised mirror storage).
+#                       Once you have manually reviewed a base, capture
+#                       its hash here so all future rebuilds verify it.
+#   new_version         Version label to stamp on the new .nupkg.
+#   installer_url       Direct vendor URL for the new installer binary.
+#   installer_glob      Filename pattern (PowerShell -Filter form) that
+#                       matches the bundled installer to swap. Searched
+#                       recursively under the extracted tools/ dir.
+#   verify              ONE of:
+#                         checksums_url + checksums_match
+#                         expected_sha256
+#                       At least one verification mode is required.
+#   notes               Optional free-text reminder for the operator.
+#
+# Verification semantics:
+#   checksums_url   URL to a text file (e.g. checksums.txt) where each
+#                   line begins "<sha256>  <filename>". The script
+#                   fetches and parses; checksums_match is a substring
+#                   the line must contain (typically the filename as it
+#                   appears in vendor's checksums file).
+#   expected_sha256 Pin a known hash directly. Lower-case hex, 64 chars.
+#
+# Supply-chain context (June 2026):
+# Recent npm / PyPI / community-package compromises show that
+# upstream feeds are an active threat vector. Our defense is a
+# three-layer trust chain captured ENTIRELY in this spec:
+#   1. Base .nupkg integrity:  base_nupkg_sha256 pin
+#      (catches a poisoned mirror cache or tampered community pull)
+#   2. Installer binary integrity: checksums_url+checksums_match OR
+#      expected_sha256 (verifies bytes against the official vendor source)
+#   3. Repack-from-source: the new .nupkg is built locally and is NOT
+#      pulled from a third party at deploy time
+# When all three are populated, no clients have to trust the community
+# feed at install-time -- they only need to trust THIS spec file.
+#
+# Sentinels prevent re-builds. Pass -e "wrapper_force=true" to ignore
+# them. Pass -e "wrapper_only=<id>" to limit to a single entry.
+
+chocoBuild_wrapper_packages:
+
+  - id: docker-desktop
+    base_version: '4.75.0'
+    base_nupkg_sha256: '117aca2f068bddabc620f4badbb4cffb7eb25af6a1a4bdb8f3fbb3fee393723c'
+    new_version:  '4.76.0'
+    installer_url: 'https://desktop.docker.com/win/main/amd64/228118/Docker%20Desktop%20Installer.exe'
+    installer_glob: '*Docker*Desktop*Installer*.exe'
+    checksums_url:  'https://desktop.docker.com/win/main/amd64/228118/checksums.txt'
+    checksums_match: 'Docker Desktop Installer.exe'
+    notes: >-
+      Built ahead of community feed (Docker 4.76 released 2026-06-01).
+      Base .nupkg SHA captured 2026-06-09 after internalize + manual
+      review of 4.75 install script. Retire this entry once
+      docker-desktop 4.76.x lands on community AND has been added to
+      internalize-spec.yml.

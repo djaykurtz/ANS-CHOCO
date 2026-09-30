@@ -1,0 +1,28 @@
+---
+- name: Join Windows host to domain using microsoft.ad.membership
+  hosts: win
+  vars_files:
+    - "{{ playbook_dir }}/../vault/domJoin-secret.yml"
+  vars:
+    ansible_user: "{{ sys_adm }}"
+    ansible_password: "{{ sys_adm_pass }}"
+    ansible_connection: winrm
+    ansible_port: 5985
+    ansible_winrm_transport: ntlm
+    # ansible_winrm_scheme: http
+    # ansible_winrm_server_cert_validation: ignore
+
+  tasks:
+    - name: Join domain
+      microsoft.ad.membership:
+        dns_domain_name: infra.example.com
+        domain_admin_user: "{{ dom_adm }}"
+        domain_admin_password: "{{ dom_adm_pass }}"
+        domain_ou_path: "OU=DataCenter,OU=LocalOnly,OU=Managed,DC=infra,DC=example,DC=com"
+        state: domain
+        reboot: true
+      register: domain_join_result
+
+    - name: Reboot if required
+      ansible.windows.win_reboot:
+      when: domain_join_result.reboot_required

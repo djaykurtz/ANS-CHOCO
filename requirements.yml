@@ -1,0 +1,17 @@
+# Install into the repo-local, gitignored collections/ dir:
+#   ansible-galaxy collection install -r requirements.yml -p collections
+# Pinned to the known-good fleet stack (_requirements/TOOLING_VERSIONS.md). Change a pin only
+# after validating the new version on the TEST inventory.
+collections:
+  - name: chocolatey.chocolatey
+    version: "1.5.1"
+  - name: community.windows
+    version: "3.0.0"
+  - name: ansible.windows
+    version: "3.1.0"
+  # Official Microsoft AD collection; domJoin uses microsoft.ad.membership.
+  - name: microsoft.ad
+    version: "1.12.1"
+  # profile_tasks callback named in ansible.cfg.
+  - name: ansible.posix
+    version: "1.5.4"

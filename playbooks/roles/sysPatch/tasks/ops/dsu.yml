@@ -1,0 +1,100 @@
+# ops/dsu.yml -- sysPatch
+#
+# Runbook step 3. Runs the Dell update CLI for firmware and drivers. Skips
+# cleanly on non-Dell hardware and when no Dell tool is installed, because a
+# missing vendor tool is a fact to report, not a run-ending error.
+#
+# prestage forces preview mode. Staging the window must never apply firmware.
+
+- name: dsu | Resolve the audit setting for this mode
+  ansible.builtin.set_fact:
+    _sp_dsu_audit: "{{ true if (_sp_prestage | bool) else (syspatch_dsu_audit_only | bool) }}"
+  changed_when: false
+
+- name: dsu | Skip on non-Dell hardware
+  ansible.builtin.set_fact:
+    sp_dsu_result:
+      verdict: skipped
+      message: >-
+        Manufacturer is '{{ sp_preflight.manufacturer | default("unknown") }}',
+        not Dell. Nothing to update.
+      executable: ''
+      exit_code: null
+      reboot_required: false
+      output: ''
+  when:
+    - syspatch_dsu_require_dell | bool
+    - not (sp_preflight.is_dell | default(false) | bool)
+  changed_when: false
+
+- name: dsu | Run the Dell update CLI
+  when: sp_dsu_result | default({}) | length == 0
+  block:
+    - name: dsu | Upload run_dsu.ps1
+      ansible.windows.win_copy:
+        src: run_dsu.ps1
+        dest: "{{ _sp_remote_dir_fs }}/run_dsu.ps1"
+      changed_when: false
+
+    - name: dsu | Execute the Dell update CLI
+      ansible.windows.win_shell: >-
+        & "{{ _sp_remote_dir_fs }}/run_dsu.ps1"
+        -CandidatesJson '{{ syspatch_dsu_candidates | to_json }}'
+        -DsuArgs '{{ syspatch_dsu_args_dsu }}'
+        -DcuArgs '{{ syspatch_dsu_args_dcu }}'
+        -SuccessCodesJson '{{ syspatch_dsu_success_codes | to_json }}'
+        {{ '-AuditOnly' if (_sp_dsu_audit | bool) else '' }}
+      register: _sp_dsu_raw
+      changed_when: false
+      failed_when: false
+      vars:
+        ansible_command_timeout: "{{ syspatch_dsu_timeout }}"
+
+    - name: dsu | Parse the Dell update result
+      ansible.builtin.set_fact:
+        sp_dsu_result: "{{ _sp_dsu_raw.stdout | from_json }}"
+      failed_when: sp_dsu_result is not mapping
+
+- name: dsu | Show the Dell update result
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}] dsu
+      verdict={{ sp_dsu_result.verdict }}
+      tool={{ sp_dsu_result.executable | default('none') | basename }}
+      exit={{ sp_dsu_result.exit_code | default('n/a') }}
+      reboot_required={{ sp_dsu_result.reboot_required | default(false) }}
+      -- {{ sp_dsu_result.message | default('') }}
+
+- name: dsu | Show the Dell update output
+  ansible.builtin.debug:
+    msg: "{{ (sp_dsu_result.output | default('')).split('\n') }}"
+  when: (sp_dsu_result.output | default('') | length) > 0
+
+- name: dsu | Record the Dell update event
+  ansible.builtin.set_fact:
+    sp_events: >-
+      {{
+        sp_events + [{
+          'phase': 'dsu',
+          'action': ('Skipped' if sp_dsu_result.verdict == 'skipped' else 'Applied'),
+          'result': sp_dsu_result.verdict,
+          'detail': (
+            (sp_dsu_result.executable | default('') | basename) ~ ' exit=' ~
+            (sp_dsu_result.exit_code | default('n/a') | string) ~ ' -- ' ~
+            (sp_dsu_result.message | default(''))
+          )
+        }]
+      }}
+  changed_when: false
+
+- name: dsu | Record Dell update errors
+  ansible.builtin.set_fact:
+    sp_errors: >-
+      {{
+        sp_errors + [{
+          'phase': 'dsu',
+          'message': (sp_dsu_result.message | default('Dell update failed'))
+        }]
+      }}
+  when: sp_dsu_result.verdict | default('') == 'error'
+  changed_when: false

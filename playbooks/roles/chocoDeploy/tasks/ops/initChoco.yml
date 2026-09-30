@@ -1,0 +1,165 @@
+---
+# initChoco.yml
+# Runs first. Ensures Chocolatey + extensions exist and prepares source routing.
+
+- name: initChoco | Gather minimal facts
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - "min"
+  tags: [choco_init]
+
+# ---- Chocolatey bootstrap ----
+- name: initChoco | Detect if Chocolatey already installed
+  ansible.windows.win_command: choco -v
+  register: choco_ver_cmd
+  failed_when: false
+  changed_when: false
+  tags: [choco_init]
+
+- name: initChoco | Bootstrap Chocolatey on fresh system
+  ansible.windows.win_shell: |
+    Set-ExecutionPolicy Bypass -Scope Process -Force
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+    Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+  when: choco_ver_cmd.rc != 0
+  changed_when: true
+  tags: [choco_init]
+
+- name: initChoco | Ensure Chocolatey is installed
+  chocolatey.chocolatey.win_chocolatey:
+    name: chocolatey
+    state: present
+  tags: [choco_init]
+
+- name: initChoco | Ensure Chocolatey extensions installed
+  chocolatey.chocolatey.win_chocolatey:
+    name:
+      - chocolatey-core.extension
+      - chocolatey-windowsupdate.extension
+    state: present
+    source: >-
+      {{
+        (choco_public_source_name | default('chocolatey'))
+        if (choco_explicit_source_routing | default(true) | bool)
+        else omit
+      }}
+    timeout: 1800
+  register: choco_extensions
+  retries: 1
+  delay: 30
+  until: choco_extensions is succeeded
+  tags: [choco_init]
+
+- name: initChoco | Ensure trusted Chocolatey source exists and is enabled
+  chocolatey.chocolatey.win_chocolatey_source:
+    name: "{{ trusted_choco_source.name }}"
+    source: "{{ trusted_choco_source.url }}"
+    state: present
+    priority: "{{ trusted_choco_source.priority | default(1) }}"
+    source_username: "{{ trusted_choco_source.source_username | default(omit, true) }}"
+    source_password: "{{ trusted_choco_source.source_password | default(omit, true) }}"
+    update_password: always
+  when: trusted_choco_source.url | default('') | length > 0
+  tags: [choco_init]
+
+- name: initChoco | Build manual internal repo package ids
+  ansible.builtin.set_fact:
+    choco_manual_internal_repo_package_ids: >-
+      {{
+        (chocoInternalRepo | default([]))
+        | unique
+        | list
+      }}
+  changed_when: false
+
+- name: initChoco | Probe internal source once for managed app packages
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    $sourceName = '{{ trusted_choco_source.name }}'
+    $packagesJson = @'
+    {{ ((choco_selected_apps | default(choco_managed_apps)) | map(attribute='key') | list | difference(choco_manual_internal_repo_package_ids | default([])) | unique | list) | to_json }}
+    '@
+    $packages = @()
+    if ($packagesJson.Trim()) {
+      $parsed = $packagesJson | ConvertFrom-Json
+      if ($parsed -is [System.Array]) {
+        $packages = $parsed
+      } elseif ($null -ne $parsed) {
+        $packages = @($parsed)
+      }
+    }
+    $found = @()
+
+    foreach ($pkg in $packages) {
+      $output = choco search $pkg --source $sourceName --exact --by-id-only --limit-output 2>$null
+      if ($LASTEXITCODE -eq 0 -and $output -match ('^' + [regex]::Escape($pkg) + '\|')) {
+        $found += $pkg
+      }
+    }
+
+    [pscustomobject]@{
+      packages = $found
+    } | ConvertTo-Json -Compress
+  register: choco_internal_source_probe
+  changed_when: false
+  failed_when: false
+  run_once: true
+  when:
+    - choco_explicit_source_routing | default(true) | bool
+    - choco_auto_discover_internalized_apps | default(true) | bool
+    - (((choco_selected_apps | default(choco_managed_apps)) | map(attribute='key') | list | difference(choco_manual_internal_repo_package_ids | default([])) | unique | list) | length) > 0
+    - trusted_choco_source.url | default('') | length > 0
+
+- name: initChoco | Publish discovered internalized app ids
+  ansible.builtin.set_fact:
+    choco_discovered_internalized_app_ids_resolved: "{{ ((choco_internal_source_probe.stdout | trim | from_json).packages | default([])) if ((choco_internal_source_probe.stdout | default('') | trim | length) > 0) else [] }}"
+  run_once: true
+  changed_when: false
+  when:
+    - choco_explicit_source_routing | default(true) | bool
+    - choco_auto_discover_internalized_apps | default(true) | bool
+
+- name: initChoco | Publish discovered internalized app ids to localhost facts
+  ansible.builtin.set_fact:
+    choco_discovered_internalized_app_ids: "{{ choco_discovered_internalized_app_ids_resolved | default([]) }}"
+  delegate_to: localhost
+  delegate_facts: true
+  run_once: true
+  changed_when: false
+  when:
+    - choco_explicit_source_routing | default(true) | bool
+    - choco_auto_discover_internalized_apps | default(true) | bool
+
+- name: initChoco | Build package source routing facts
+  ansible.builtin.set_fact:
+    choco_internalized_package_ids: >-
+      {{
+        (
+          (choco_manual_internal_repo_package_ids | default([]))
+          + (hostvars['localhost'].choco_discovered_internalized_app_ids | default([]))
+        )
+        | unique
+        | list
+      }}
+    choco_public_source_effective: "{{ choco_public_source_name | default('chocolatey') }}"
+  changed_when: false
+
+- name: initChoco | Source routing summary
+  ansible.builtin.debug:
+    msg: >-
+      initChoco source routing:
+      explicit={{ choco_explicit_source_routing | default(true) | bool }},
+      manual_internal_repo={{ choco_manual_internal_repo_package_ids | default([]) }},
+      auto_discovered_apps={{ hostvars['localhost'].choco_discovered_internalized_app_ids | default([]) }},
+      internal_source={{ trusted_choco_source.name | default('') }},
+      public_source={{ choco_public_source_effective }},
+      internalized_packages={{ choco_internalized_package_ids }}
+  when: choco_deploy_console_verbose | default(false) | bool
+  changed_when: false
+
+- name: initChoco | Disable public Chocolatey source
+  chocolatey.chocolatey.win_chocolatey_source:
+    name: chocolatey
+    state: disabled
+  when: choco_disable_public_source | default(false) | bool

@@ -1,0 +1,4 @@
+# roles/getAzKVSecret/meta/main.yml
+dependencies: []
+collections:
+  - community.windows

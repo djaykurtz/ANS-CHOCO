@@ -1,0 +1,43 @@
+---
+# playbooks/chocoBuild-iterate.yml
+#
+# Iterate-on-target loop for a chocolatey package staged on a Windows
+# TEST host. Tags: extract | repack | install | all.
+# Required: -e "iter_package=<id> iter_version=<ver>"
+#
+# Operator docs:
+#   docs/build/chocoBuild_QuickRef.md   (iterate loop section)
+#   docs/build/chocoBuild_Guide.md      (architecture + why iterate-on-target)
+
+- name: chocoBuild-iterate | extract/repack/install loop on a TEST host
+  hosts: "{{ iter_target | default('test-host-01.corp.example.com') }}"
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/catalogs/chocolatey_packages.yml"
+    - "{{ playbook_dir }}/../vault/corp-ans-secret.yml"
+
+  tasks:
+    - name: chocoBuild-iterate | extract
+      ansible.builtin.include_role:
+        name: chocoBuild
+        tasks_from: iterate/extract-on-target.yml
+        apply:
+          tags: [extract, all]
+      tags: [extract, all]
+
+    - name: chocoBuild-iterate | repack
+      ansible.builtin.include_role:
+        name: chocoBuild
+        tasks_from: iterate/repack-on-target.yml
+        apply:
+          tags: [repack, all]
+      tags: [repack, all]
+
+    - name: chocoBuild-iterate | install
+      ansible.builtin.include_role:
+        name: chocoBuild
+        tasks_from: iterate/install-on-target.yml
+        apply:
+          tags: [install, all]
+      tags: [install, all]

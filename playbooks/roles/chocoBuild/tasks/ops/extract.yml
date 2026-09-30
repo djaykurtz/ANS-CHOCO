@@ -1,0 +1,7 @@
+---
+# Phase 4 placeholder - shared op: unpack a .nupkg to a working dir.
+# Different from iterate/extract-on-target.yml which runs on a remote
+# test host; this is the build-host (mirror) version.
+- name: chocoBuild ops/extract | NOT YET IMPLEMENTED (Phase 4)
+  ansible.builtin.fail:
+    msg: "ops/extract.yml is a Phase 4 stub."

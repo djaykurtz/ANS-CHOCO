@@ -1,0 +1,23 @@
+---
+- name: Apps | Stop Docker services and processes before alignment
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'SilentlyContinue'
+    # Stop Docker services
+    Get-Service -Name 'com.docker*','docker*' -ErrorAction SilentlyContinue |
+      Where-Object { $_.Status -eq 'Running' } |
+      ForEach-Object { Stop-Service -Name $_.Name -Force -ErrorAction SilentlyContinue }
+    # Kill Docker processes
+    Get-Process -Name 'Docker Desktop','Docker','dockerd','com.docker.backend','com.docker.proxy','com.docker.service' -ErrorAction SilentlyContinue |
+      Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    "DockerStopped"
+  changed_when: false
+  failed_when: false
+
+- name: Apps | Align docker-desktop
+  ansible.builtin.include_tasks: ops/install-one.yml
+  vars:
+    pkg:
+      name: docker-desktop
+      version: "{{ choco_target_min_version_map[app_catalog_item.key] | default(acceptable_versions.applications.docker_desktop.min_version) }}"
+      registry_patterns: "{{ app_catalog_item.registry_patterns | default(['^Docker Desktop$']) }}"

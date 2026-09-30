@@ -1,0 +1,77 @@
+# Manual Azure DevOps sample. Requires dev/main branches and token permissions.
+trigger: none
+pr: none
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+- checkout: none
+
+- task: PowerShell@2
+  displayName: ChocoFleet Dev - Main PR
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+  inputs:
+    targetType: inline
+    script: |
+      $org = "$(System.CollectionUri)"
+      $project = "$(System.TeamProject)"
+      $repoId = "$(Build.Repository.ID)"
+
+      if ([string]::IsNullOrWhiteSpace($env:SYSTEM_ACCESSTOKEN)) {
+          throw "System.AccessToken is required for this Azure DevOps sample."
+      }
+
+      $headers = @{
+        Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN"
+        "Content-Type" = "application/json"
+        "Accept" = "application/json; api-version=7.0"
+      }
+
+      # 1. Check for existing active PR dev -> main
+      $prQueryUrl = "$org$project/_apis/git/repositories/$repoId/pullrequests" +
+                    "?searchCriteria.sourceRefName=refs/heads/dev" +
+                    "&searchCriteria.targetRefName=refs/heads/main" +
+                    "&searchCriteria.status=active" +
+                    "&api-version=7.0"
+
+      $existingPRs = Invoke-RestMethod -Method Get -Uri $prQueryUrl -Headers $headers
+
+      if ($existingPRs.count -gt 0) {
+          Write-Host "Active dev -> main PR already exists. Reusing it."
+
+          $prId = $existingPRs.value[0].pullRequestId
+
+          # (Optional) Ensure auto-complete is enabled
+          $updateBody = @{
+              completionOptions = @{
+                  mergeStrategy = "noFastForward"
+                  deleteSourceBranch = $false
+              }
+          } | ConvertTo-Json -Depth 5
+
+          $updateUrl = "$org$project/_apis/git/repositories/$repoId/pullrequests/$prId"
+
+          Invoke-RestMethod -Method Patch -Uri $updateUrl -Headers $headers -Body $updateBody
+
+          Write-Host "PR #$prId updated."
+      }
+      else {
+          Write-Host "No active PR found. Creating new dev -> main PR."
+
+          $createBody = @{
+              sourceRefName = "refs/heads/dev"
+              targetRefName = "refs/heads/main"
+              title = "Auto PR: dev → main"
+              description = "Automatically created after successful Run-ChocoFleetLint"
+              completionOptions = @{
+                  mergeStrategy = "noFastForward"
+                  deleteSourceBranch = $false
+              }
+          } | ConvertTo-Json -Depth 5
+
+          $createUrl = "$org$project/_apis/git/repositories/$repoId/pullrequests?api-version=7.0"
+
+          Invoke-RestMethod -Method Post -Uri $createUrl -Headers $headers -Body $createBody
+      }

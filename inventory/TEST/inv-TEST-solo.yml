@@ -1,0 +1,7 @@
+---
+# Permanent test host. Always available and always cleared for full test freedom.
+all:
+  children:
+    basic_hosts:
+      hosts:
+        test-host-01.corp.example.com:

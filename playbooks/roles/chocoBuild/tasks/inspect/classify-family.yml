@@ -1,0 +1,7 @@
+---
+# Future placeholder - dry-run inspector: download a community .nupkg,
+# classify which install-script family it falls into, preview what
+# the internalizer would change.
+- name: chocoBuild inspect_classify | NOT YET IMPLEMENTED (future)
+  ansible.builtin.fail:
+    msg: "inspect/classify-family.yml is a future stub."

@@ -1,0 +1,67 @@
+# ops/rebootCycle.yml -- sysPatch
+#
+# Runbook steps 4 and 5. Reboots the host and waits for it to answer WinRM
+# again. The authorization gates are re-checked here as well as in preflight,
+# because this file is reachable through --tags reboot without preflight.
+
+- name: reboot | Re-confirm the reboot authorization
+  ansible.builtin.assert:
+    that:
+      - syspatch_allow_reboot | bool
+      - inventory_hostname_short in (syspatch_reboot_allowed_hosts | default([]))
+    fail_msg: >-
+      Refusing to reboot {{ inventory_hostname }}. A reboot needs
+      -e "syspatch_allow_reboot=true" and the host listed in
+      syspatch_reboot_allowed_hosts.
+    quiet: true
+
+- name: reboot | Capture the boot time before the reboot
+  ansible.windows.win_shell: (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')
+  register: _sp_boot_before
+  changed_when: false
+
+- name: reboot | Restart the host and wait for WinRM
+  ansible.windows.win_reboot:
+    reboot_timeout: "{{ syspatch_reboot_timeout | int }}"
+    post_reboot_delay: "{{ syspatch_post_reboot_settle_seconds | int }}"
+    msg: "sysPatch maintenance window. Restarting to complete updates."
+  register: _sp_reboot
+
+- name: reboot | Capture the boot time after the reboot
+  ansible.windows.win_shell: (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')
+  register: _sp_boot_after
+  changed_when: false
+
+- name: reboot | Confirm the host actually restarted
+  ansible.builtin.assert:
+    that:
+      - (_sp_boot_after.stdout | trim) != (_sp_boot_before.stdout | trim)
+    fail_msg: >-
+      {{ inventory_hostname }} reports the same last boot time before and after
+      the reboot ({{ _sp_boot_before.stdout | trim }}). The restart did not take
+      effect. Investigate before trusting the verification results.
+    quiet: true
+
+- name: reboot | Record the reboot event
+  ansible.builtin.set_fact:
+    sp_rebooted: true
+    sp_events: >-
+      {{
+        sp_events + [{
+          'phase': 'reboot',
+          'action': 'Rebooted',
+          'result': 'ok',
+          'detail': (
+            'boot ' ~ (_sp_boot_before.stdout | trim) ~ ' -> ' ~ (_sp_boot_after.stdout | trim) ~
+            '; back in ' ~ (_sp_reboot.elapsed | default(0) | string) ~ 's'
+          )
+        }]
+      }}
+  changed_when: false
+
+- name: reboot | Show the reboot result
+  ansible.builtin.debug:
+    msg: >-
+      [{{ inventory_hostname }}] rebooted and answering WinRM again after
+      {{ _sp_reboot.elapsed | default(0) }}s. Settling
+      {{ syspatch_post_reboot_settle_seconds }}s was applied before verification.

@@ -1,0 +1,6 @@
+---
+all:
+  children:
+    basic_hosts:
+      hosts:
+        mirror-01.infra.example.com:

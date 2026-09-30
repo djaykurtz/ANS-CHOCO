@@ -1,0 +1,25 @@
+---
+
+- hosts: win
+  vars_files:
+    - "{{ playbook_dir }}/../vault/domJoin-secret.yml"
+  vars:
+    ansible_winrm_transport: ntlm
+    ansible_user: "{{ sys_adm }}"
+    ansible_password: "{{ sys_adm_pass }}"
+
+  tasks:
+  - name: WinDomainJoin
+    win_domain_membership:
+      dns_domain_name: 'infra.example.com'
+      hostname: 'example-lab-host'
+      domain_admin_user: '{{ dom_adm }}'
+      domain_admin_password: '{{ dom_adm_pass }}'
+      domain_ou_path: 'OU=DataCenter,OU=LocalOnly,OU=Managed,DC=infra,DC=example,DC=com'
+      state: domain
+      reboot_required: true
+    register: domain_state
+
+  - name: Reboot host after domain join
+    ansible.windows.win_reboot: # optional full module path
+    when: domain_state.reboot_required
