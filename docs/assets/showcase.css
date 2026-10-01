@@ -25,8 +25,12 @@ button { font: inherit; cursor: pointer; }
 code { font-family: var(--mono); font-size: .9em; }
 .skip-link { position: fixed; top: -80px; left: 20px; z-index: 10; padding: 14px; background: var(--panel); }
 .skip-link:focus { top: 12px; }
-.masthead { min-height: 64px; display: flex; justify-content: space-between; align-items: center; gap: 24px; border-bottom: 1px solid var(--line); padding: 0 40px; }
-.masthead > a:last-child { font-size: 16px; text-decoration: none; }
+.masthead { min-height: 64px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px 24px; border-bottom: 1px solid var(--line); padding: 8px 40px; }
+.masthead-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.masthead-nav a { display: inline-flex; align-items: center; min-height: 44px; padding: 8px 12px; font-size: 16px; text-decoration: none; }
+.masthead-nav .portfolio-return { color: var(--ink); border: 1px solid var(--line); }
+.section-nav { display: flex; flex-wrap: wrap; gap: 8px 24px; max-width: 1600px; margin: 0 auto; padding: 12px 40px; border-bottom: 1px solid var(--line); }
+.section-nav a { display: inline-flex; align-items: center; min-height: 44px; font-size: 16px; }
 .brand { display: flex; align-items: center; gap: 14px; color: var(--ink); font-weight: 650; letter-spacing: .045em; text-decoration: none; }
 .signal { display: flex; align-items: flex-end; height: 21px; gap: 3px; }
 .signal i { display: block; width: 3px; height: 9px; background: var(--net); }
@@ -118,6 +122,7 @@ footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16
 @media (max-width: 1100px) {
   main { padding: 0 24px; }
   .masthead { padding: 0 24px; }
+  .section-nav { padding-inline: 24px; }
   .intro { gap: 35px; }
   .movement-copy { grid-template-columns: 140px 1fr; }
   #movement-description, .movement-copy .caption { grid-column: 2; }
@@ -127,6 +132,7 @@ footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16
 @media (max-width: 680px) {
   main { padding: 0 16px; }
   .masthead { padding: 0 16px; gap: 12px; }
+  .section-nav { padding-inline: 16px; }
   .masthead > .eyebrow { display: none; }
   .intro { grid-template-columns: 1fr; gap: 20px; }
   .intro-note { justify-self: start; }
