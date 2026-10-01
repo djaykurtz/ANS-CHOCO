@@ -26,7 +26,7 @@
         <h1 id="page-title">From approved package<br>to accountable change.</h1>
       </div>
       <div class="intro-note">
-        <p>A catalog defines intent. Roles reconcile the host. Evidence records what actually happened.</p>
+        <p>Windows software arrives through different installers and drifts over time. ANS-CHOCO prepares approved packages, aligns host state, and records the result.</p>
         <p class="caption">Static educational model. No fleet connection, credentials, or execution controls.</p>
       </div>
     </section>
@@ -47,7 +47,7 @@
       <div class="movement-copy" aria-live="polite" aria-atomic="true">
         <p class="eyebrow" id="movement-label">00 / Full system</p>
         <h3 id="movement-title">Separate intent, execution, and evidence.</h3>
-        <p id="movement-description">The repository describes approved state. The controller assembles and runs roles. Windows helpers reconcile the actual host. Reports describe outcomes, not guarantees.</p>
+        <p id="movement-description">The catalog defines approved software. Ansible roles prepare packages and align Windows hosts. Per-host and fleet reports make changes, retries, and reboot advisories reviewable.</p>
         <p class="caption" id="movement-boundary">Explore without connecting to a host. The published page is static and carries no vault, inventory exports, or real deployment reports.</p>
       </div>
       <noscript><p>The full-size, scrollable diagram and textual architecture are available without JavaScript. Movement highlighting and zoom buttons require JavaScript.</p></noscript>
@@ -56,7 +56,7 @@
     <section class="architecture" id="diagram-frame" aria-labelledby="diagram-heading">
       <div class="section-heading">
         <h2 id="diagram-heading">The system, in one frame</h2>
-        <span class="eyebrow">Current source paths / dashed cards below = proposed or incomplete</span>
+        <span class="eyebrow">Delivered pipeline / configuration, execution, and evidence</span>
       </div>
       <div class="diagram-toolbar">
         <p id="diagram-help">The diagram stays at a readable size. Scroll sideways or choose a movement above to focus its part of the system.</p>
@@ -110,7 +110,7 @@
             <text x="50" y="156">playbooks/ + role task trees</text>
             <text x="50" y="181">requirements.yml collections</text>
             <text x="50" y="206">Manual Azure / Arc samples</text>
-            <text class="node-foot" x="50" y="228">External pull script not included</text>
+            <text class="node-foot" x="50" y="228">Deployment-managed checkout</text>
           </g>
           <g class="node" data-steps="1 2">
             <rect x="32" y="267" width="280" height="124" rx="3"/>
@@ -157,7 +157,7 @@
             <text class="node-kicker" x="408" y="466">PRIVATE / NEVER PUBLISHED</text>
             <text class="node-title" x="408" y="493">Local vault/</text>
             <text x="408" y="520">vars_files + vault password</text>
-            <text class="node-foot" x="408" y="543"><tspan x="408">Key Vault retrieval </tspan><tspan x="408" dy="21">is not integrated</tspan></text>
+            <text class="node-foot" x="408" y="543"><tspan x="408">Encrypted credentials </tspan><tspan x="408" dy="21">loaded by playbooks</tspan></text>
           </g>
           <g class="node" data-steps="5">
             <rect x="632" y="438" width="218" height="132" rx="3"/>
@@ -210,16 +210,22 @@
     </div>
 
     <section class="boundaries" aria-labelledby="boundary-heading">
-      <h2 id="boundary-heading">Not every layer is finished</h2>
+      <h2 id="boundary-heading">Delivered scope and design decisions</h2>
       <div class="boundary-grid">
-        <article class="incomplete">
-          <p class="eyebrow">Fail-fast stubs</p><h3>Build operations are explicit about absence.</h3>
-          <p>First-party authoring, family classification, and standalone extract/repack/sign/verify tasks fail with a clear stub message. Community and wrapper paths and on-target iteration are implemented separately. SHA checking is not package signing.</p>
+        <article class="delivered">
+          <p class="eyebrow">Package preparation and role reuse</p><h3>Build artifacts separately; reuse deployment logic.</h3>
+          <p>Community-package internalization and checksum-verified wrappers prepare Chocolatey artifacts for configured sources. On-target extract/repack/install iteration keeps the test cycle local. Its install step reuses <code>chocoDeploy</code>, keeping reconciliation and reporting in one operational engine.</p>
         </article>
-        <article class="incomplete">
-          <p class="eyebrow">Partial / proposed layers</p><h3>No invented orchestration.</h3>
-          <p><code>sysPatch</code> delegates update work to <code>winUpdate</code> but lacks verification/report tasks and an entry playbook. Key Vault retrieval exists but fleet plays still use local vault files. Semaphore, automatic remediation, and external Arc checkout management are not supplied integrations.</p>
+        <article class="delivered">
+          <p class="eyebrow">Policy-driven operations and evidence</p><h3>Separate target scope, host work, and review.</h3>
+          <p>CSV and AD evidence apply protected-OU policy during inventory creation. Deployment modes reconcile registry and Chocolatey state against application and runtime floors. Explicit removal/reboot controls and per-host JSON, daily HTML, and fleet summaries support deliberate execution and review.</p>
         </article>
+      </div>
+      <div class="portability">
+        <p class="eyebrow">Portability and future enhancements</p>
+        <h3>Evolution with scale and security requirements</h3>
+        <p>The current execution path is Ansible and WinRM. Catalogs, inventories, adjacent connection variables, package sources, and configuration separate environment choices from reusable roles.</p>
+        <p>As deployment scale, business scope, and security requirements evolve, enhancement options include Azure Arc execution through official modules and client-based authentication, with the aim of reducing reliance on WinRM.</p>
       </div>
     </section>
 
@@ -268,7 +274,7 @@
     <footer>
       <span>David Kurtz / <a href="https://github.com/djaykurtz">djaykurtz</a></span>
       <span>Designed for explanation. Not a live operations console.</span>
-      <a href="https://github.com/djaykurtz/ANS-CHOCO#readme">Quickstart + implementation limits &nearr;</a>
+      <a href="https://github.com/djaykurtz/ANS-CHOCO#readme">Quickstart + operational guidance &nearr;</a>
     </footer>
   </main>
 </body>

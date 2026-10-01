@@ -4,20 +4,20 @@ const movements = [
   {
     label: "00 / Full system",
     title: "Separate intent, execution, and evidence.",
-    description: "The repository describes approved state. The controller assembles and runs roles. Windows helpers reconcile the actual host. Reports describe outcomes, not guarantees.",
+    description: "The catalog defines approved software. Ansible roles prepare packages and align Windows hosts. Per-host and fleet reports make changes, retries, and reboot advisories reviewable.",
     boundary: "Explore without connecting to a host. The published page is static and carries no vault, inventory exports, or real deployment reports.",
   },
   {
     label: "01 / Reviewable intent",
     title: "Promote configuration, not assumptions.",
     description: "The shared catalog, approved floors, build specifications, and pinned collections form the source contract. validate_catalog.py checks consistency before an operator prepares a run.",
-    boundary: "Catalog warnings are coverage gaps. Offline consistency does not establish live package availability, compatibility, or a successful rollout.",
+    boundary: "Version promotion pairs reviewed configuration with package-source checks and a lab install before deployment. The catalog validator supports that review by checking consistency.",
   },
   {
     label: "02 / Artifact preparation",
     title: "Build once; reuse the installation engine.",
     description: "chocoBuild invokes Windows helpers for community internalization and checksum-verified wrappers. Its test-install action includes chocoDeploy with a local source and a single package.",
-    boundary: "First-party authoring, classifier, and standalone signing/verification operations remain fail-fast stubs. Download hashing is implemented in wrappers, not proof of completed package signing.",
+    boundary: "Wrapper builds verify package and installer integrity with configured SHA checks. Keeping package preparation separate lets routine deployments consume reviewed artifacts.",
   },
   {
     label: "03 / Target scope",

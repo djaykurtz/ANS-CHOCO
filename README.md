@@ -38,7 +38,7 @@ Python tools create inventories and aggregate evidence. An optional Azure DevOps
 pipeline can use Azure Arc Run Command to update a separately managed control-node
 checkout; the external pull script and cloud infrastructure are not included.
 
-## What is implemented
+## Delivered pipeline scope
 
 | Surface | Behavior |
 | --- | --- |
@@ -50,12 +50,15 @@ checkout; the external pull script and cloud infrastructure are not included.
 | `softwareUsage` | Reads Security event 4688 and reports `used_recently`, `unused_in_window`, or `audit_off`; command-line and user detail can be sensitive. |
 | `webui` | Local command assembly, inventory browsing/export/save, and optional `win_ping`. It does not execute deployment playbooks. |
 
-**Boundaries:** first-party package authoring, package-family classification, and
-standalone build extract/repack/sign/verify operations are fail-fast stubs (the
-iterate extract/repack actions are implemented). `sysPatch` is incomplete and
-references missing verification/report tasks. `winUpdate` has role code but no
-standalone entry playbook. Azure Key Vault retrieval exists, but fleet playbooks
-still load file-based vaults. Proposed remediation automation is not implemented.
+The delivered pipeline centers on package preparation, policy-driven target
+selection, Windows software reconciliation, and reviewable reporting. Its build
+and deployment roles have separate responsibilities, while on-target iteration
+reuses the deployment engine. Catalogs, inventories, connection variables, and
+package sources make the configuration adaptable to another authorized environment.
+The current execution path is Ansible/WinRM with file-based vault credentials.
+See [configuration guidance](CONFIGURE.md), the [build-role reference](playbooks/roles/chocoBuild/README.md),
+and [technical roadmap](docs/FUTURE_BUILDS.md) for setup requirements and optional
+extension scope.
 
 ## Quickstart: local command-builder demo
 
